@@ -1,0 +1,5 @@
+.plex-identity-token
+.agents/
+.aws/
+.codex/
+*.log
