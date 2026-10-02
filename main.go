@@ -6,6 +6,8 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -51,8 +53,20 @@ func writeJSON(w http.ResponseWriter, body any) {
 	_ = json.NewEncoder(w).Encode(body)
 }
 
+func sanitizedURL(requestURL *url.URL) string {
+	clean := *requestURL
+	query := clean.Query()
+	for key := range query {
+		if strings.EqualFold(key, "X-Plex-Token") {
+			query.Set(key, "[REDACTED]")
+		}
+	}
+	clean.RawQuery = query.Encode()
+	return clean.String()
+}
+
 func logRequest(r *http.Request) {
-	log.Printf("%s %s from %s", r.Method, r.URL.String(), r.RemoteAddr)
+	log.Printf("%s %s from %s", r.Method, sanitizedURL(r.URL), r.RemoteAddr)
 
 	if r.URL.Path == "/identity" ||
 		r.URL.Path == "/library/metadata/1001" {
@@ -61,7 +75,7 @@ func logRequest(r *http.Request) {
 
 		for k, values := range r.Header {
 			for _, v := range values {
-				if k == "X-Plex-Token" {
+				if strings.EqualFold(k, "X-Plex-Token") {
 					log.Printf("  %s: [REDACTED]", k)
 				} else {
 					log.Printf("  %s: %s", k, v)
@@ -464,7 +478,7 @@ func writeDirectPlayDecisionXML(w http.ResponseWriter, r *http.Request) {
  year="2026">
 <Media
  aspectRatio="1.78"
- audioChannels="1"
+ audioChannels="2"
  audioCodec="aac"
  audioProfile="lc"
  bitrate="%d"
@@ -474,7 +488,7 @@ func writeDirectPlayDecisionXML(w http.ResponseWriter, r *http.Request) {
  id="2001"
  optimizedForStreaming="1"
  videoCodec="h264"
- videoFrameRate="15p"
+ videoFrameRate="30p"
  videoProfile="high"
  videoResolution="1080"
  width="1920"
@@ -496,7 +510,7 @@ func writeDirectPlayDecisionXML(w http.ResponseWriter, r *http.Request) {
  default="1"
  displayTitle="1080p"
  extendedDisplayTitle="1080p (H.264)"
- frameRate="15.000"
+ frameRate="30.000"
  height="1080"
  id="4001"
  index="0"
@@ -506,16 +520,16 @@ func writeDirectPlayDecisionXML(w http.ResponseWriter, r *http.Request) {
  width="1920"
  location="direct" />
 <Stream
- audioChannelLayout="mono"
- channels="1"
+ audioChannelLayout="stereo"
+ channels="2"
  codec="aac"
  default="1"
- displayTitle="Unknown (AAC Mono)"
- extendedDisplayTitle="Unknown (AAC Mono)"
+ displayTitle="Unknown (AAC Stereo)"
+ extendedDisplayTitle="Unknown (AAC Stereo)"
  id="4002"
  index="1"
  profile="lc"
- samplingRate="8000"
+ samplingRate="48000"
  selected="1"
  streamIdentifier="2"
  streamType="2"
