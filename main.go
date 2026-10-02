@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"fmt"
-	"html"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +35,160 @@ const (
 	movieBitrate  = 336
 )
 
+type plexBool bool
+
+func (value plexBool) MarshalJSON() ([]byte, error) {
+	if value {
+		return []byte("true"), nil
+	}
+	return []byte("false"), nil
+}
+
+func (value *plexBool) UnmarshalJSON(data []byte) error {
+	var parsed bool
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return err
+	}
+	*value = plexBool(parsed)
+	return nil
+}
+
+func (value plexBool) MarshalText() ([]byte, error) {
+	if value {
+		return []byte("1"), nil
+	}
+	return []byte("0"), nil
+}
+
+func (value *plexBool) UnmarshalText(text []byte) error {
+	parsed, err := strconv.ParseBool(strings.ReplaceAll(string(text), "1", "true"))
+	if err != nil {
+		return err
+	}
+	*value = plexBool(parsed)
+	return nil
+}
+
+type plexFrameRate float64
+
+func (value plexFrameRate) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatFloat(float64(value), 'f', 1, 64)), nil
+}
+
+func (value plexFrameRate) MarshalText() ([]byte, error) {
+	return []byte(strconv.FormatFloat(float64(value), 'f', 3, 64)), nil
+}
+
+type mediaContainer struct {
+	XMLName             xml.Name `json:"-" xml:"MediaContainer"`
+	Size                int      `json:"size" xml:"size,attr"`
+	AllowSync           plexBool `json:"allowSync" xml:"allowSync,attr"`
+	Identifier          string   `json:"identifier" xml:"identifier,attr"`
+	LibrarySectionID    int      `json:"librarySectionID" xml:"librarySectionID,attr"`
+	LibrarySectionTitle string   `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
+	LibrarySectionUUID  string   `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
+	MDEDecisionCode     int      `json:"mdeDecisionCode,omitempty" xml:"mdeDecisionCode,attr,omitempty"`
+	MDEDecisionText     string   `json:"mdeDecisionText,omitempty" xml:"mdeDecisionText,attr,omitempty"`
+	MediaTagPrefix      string   `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
+	MediaTagVersion     int      `json:"mediaTagVersion" xml:"mediaTagVersion,attr"`
+	ResourceSession     string   `json:"resourceSession,omitempty" xml:"resourceSession,attr,omitempty"`
+	Metadata            []movie  `json:"Metadata" xml:"Video"`
+}
+
+type mediaContainerResponse struct {
+	MediaContainer mediaContainer `json:"MediaContainer"`
+}
+
+type movie struct {
+	RatingKey             string  `json:"ratingKey" xml:"ratingKey,attr"`
+	Key                   string  `json:"key" xml:"key,attr"`
+	GUID                  string  `json:"guid" xml:"guid,attr"`
+	Type                  string  `json:"type" xml:"type,attr"`
+	Title                 string  `json:"title" xml:"title,attr"`
+	TitleSort             string  `json:"titleSort" xml:"titleSort,attr"`
+	OriginalTitle         string  `json:"originalTitle" xml:"originalTitle,attr"`
+	Summary               string  `json:"summary" xml:"summary,attr"`
+	Year                  int     `json:"year" xml:"year,attr"`
+	Duration              int     `json:"duration" xml:"duration,attr"`
+	AddedAt               int64   `json:"addedAt" xml:"addedAt,attr"`
+	UpdatedAt             int64   `json:"updatedAt" xml:"updatedAt,attr"`
+	LibrarySectionID      int     `json:"librarySectionID" xml:"librarySectionID,attr"`
+	LibrarySectionKey     string  `json:"librarySectionKey" xml:"librarySectionKey,attr"`
+	LibrarySectionTitle   string  `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
+	LibrarySectionUUID    string  `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
+	ContentRating         string  `json:"contentRating" xml:"contentRating,attr"`
+	Rating                float64 `json:"rating" xml:"rating,attr"`
+	AudienceRating        float64 `json:"audienceRating" xml:"audienceRating,attr"`
+	OriginallyAvailableAt string  `json:"originallyAvailableAt" xml:"originallyAvailableAt,attr"`
+	PlayQueueItemID       int     `json:"playQueueItemID,omitempty" xml:"playQueueItemID,attr,omitempty"`
+	Media                 []media `json:"Media" xml:"Media"`
+}
+
+type media struct {
+	ID                    int       `json:"id" xml:"id,attr"`
+	Duration              int       `json:"duration" xml:"duration,attr"`
+	Bitrate               int       `json:"bitrate" xml:"bitrate,attr"`
+	Width                 int       `json:"width" xml:"width,attr"`
+	Height                int       `json:"height" xml:"height,attr"`
+	AspectRatio           float64   `json:"aspectRatio" xml:"aspectRatio,attr"`
+	AudioChannels         int       `json:"audioChannels" xml:"audioChannels,attr"`
+	AudioCodec            string    `json:"audioCodec" xml:"audioCodec,attr"`
+	VideoCodec            string    `json:"videoCodec" xml:"videoCodec,attr"`
+	VideoResolution       string    `json:"videoResolution" xml:"videoResolution,attr"`
+	Container             string    `json:"container" xml:"container,attr"`
+	VideoFrameRate        string    `json:"videoFrameRate" xml:"videoFrameRate,attr"`
+	OptimizedForStreaming int       `json:"optimizedForStreaming" xml:"optimizedForStreaming,attr"`
+	Has64BitOffsets       plexBool  `json:"has64bitOffsets" xml:"has64bitOffsets,attr"`
+	VideoProfile          string    `json:"videoProfile" xml:"videoProfile,attr"`
+	HasVoiceActivity      plexBool  `json:"hasVoiceActivity" xml:"hasVoiceActivity,attr"`
+	Selected              *plexBool `json:"selected,omitempty" xml:"selected,attr,omitempty"`
+	Part                  []part    `json:"Part" xml:"Part"`
+}
+
+type part struct {
+	ID                    int       `json:"id" xml:"id,attr"`
+	Key                   string    `json:"key" xml:"key,attr"`
+	Duration              int       `json:"duration" xml:"duration,attr"`
+	File                  string    `json:"file" xml:"file,attr"`
+	Size                  int       `json:"size" xml:"size,attr"`
+	Container             string    `json:"container" xml:"container,attr"`
+	Has64BitOffsets       plexBool  `json:"has64bitOffsets" xml:"has64bitOffsets,attr"`
+	OptimizedForStreaming plexBool  `json:"optimizedForStreaming" xml:"optimizedForStreaming,attr"`
+	VideoProfile          string    `json:"videoProfile" xml:"videoProfile,attr"`
+	Decision              string    `json:"decision,omitempty" xml:"decision,attr,omitempty"`
+	Selected              *plexBool `json:"selected,omitempty" xml:"selected,attr,omitempty"`
+	Stream                []stream  `json:"Stream" xml:"Stream"`
+}
+
+type stream struct {
+	ID                   int            `json:"id" xml:"id,attr"`
+	StreamType           int            `json:"streamType" xml:"streamType,attr"`
+	Selected             plexBool       `json:"selected,omitempty" xml:"selected,attr,omitempty"`
+	Default              plexBool       `json:"default" xml:"default,attr"`
+	Codec                string         `json:"codec" xml:"codec,attr"`
+	Index                int            `json:"index" xml:"index,attr"`
+	Bitrate              int            `json:"bitrate" xml:"bitrate,attr"`
+	BitDepth             int            `json:"bitDepth,omitempty" xml:"bitDepth,attr,omitempty"`
+	ChromaLocation       string         `json:"chromaLocation,omitempty" xml:"chromaLocation,attr,omitempty"`
+	ChromaSubsampling    string         `json:"chromaSubsampling,omitempty" xml:"chromaSubsampling,attr,omitempty"`
+	CodedHeight          int            `json:"codedHeight,omitempty" xml:"codedHeight,attr,omitempty"`
+	CodedWidth           int            `json:"codedWidth,omitempty" xml:"codedWidth,attr,omitempty"`
+	FrameRate            *plexFrameRate `json:"frameRate,omitempty" xml:"frameRate,attr,omitempty"`
+	HasScalingMatrix     *plexBool      `json:"hasScalingMatrix,omitempty" xml:"hasScalingMatrix,attr,omitempty"`
+	Height               int            `json:"height,omitempty" xml:"height,attr,omitempty"`
+	Width                int            `json:"width,omitempty" xml:"width,attr,omitempty"`
+	Level                int            `json:"level,omitempty" xml:"level,attr,omitempty"`
+	Profile              string         `json:"profile,omitempty" xml:"profile,attr,omitempty"`
+	RefFrames            int            `json:"refFrames,omitempty" xml:"refFrames,attr,omitempty"`
+	ScanType             string         `json:"scanType,omitempty" xml:"scanType,attr,omitempty"`
+	Channels             int            `json:"channels,omitempty" xml:"channels,attr,omitempty"`
+	SamplingRate         int            `json:"samplingRate,omitempty" xml:"samplingRate,attr,omitempty"`
+	StreamIdentifier     string         `json:"streamIdentifier" xml:"streamIdentifier,attr"`
+	DisplayTitle         string         `json:"displayTitle" xml:"displayTitle,attr"`
+	ExtendedDisplayTitle string         `json:"extendedDisplayTitle" xml:"extendedDisplayTitle,attr"`
+	Location             string         `json:"location,omitempty" xml:"location,attr,omitempty"`
+}
+
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool {
 		return true
@@ -51,6 +207,54 @@ func writeJSON(w http.ResponseWriter, body any) {
 	addCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeXML(w http.ResponseWriter, body any) {
+	addCommonHeaders(w)
+	w.Header().Set("Content-Type", "text/xml;charset=utf-8")
+	_, _ = w.Write([]byte(xml.Header))
+	_ = xml.NewEncoder(w).Encode(body)
+}
+
+func acceptsJSON(r *http.Request) bool {
+	bestType := ""
+	bestQuality := -1.0
+	for _, item := range strings.Split(r.Header.Get("Accept"), ",") {
+		mediaType, parameters, err := mime.ParseMediaType(strings.TrimSpace(item))
+		if err != nil {
+			continue
+		}
+
+		quality := 1.0
+		if rawQuality, ok := parameters["q"]; ok {
+			quality, err = strconv.ParseFloat(rawQuality, 64)
+			if err != nil || quality <= 0 {
+				continue
+			}
+		}
+
+		kind := ""
+		lowerMediaType := strings.ToLower(mediaType)
+		switch {
+		case lowerMediaType == "application/json" || strings.HasSuffix(lowerMediaType, "+json"):
+			kind = "json"
+		case lowerMediaType == "application/xml", lowerMediaType == "text/xml", strings.HasSuffix(lowerMediaType, "+xml"):
+			kind = "xml"
+		}
+		if kind != "" && quality > bestQuality {
+			bestType = kind
+			bestQuality = quality
+		}
+	}
+	return bestType == "json"
+}
+
+func writeNegotiatedMediaContainer(w http.ResponseWriter, r *http.Request, container mediaContainer) {
+	if acceptsJSON(r) {
+		writeJSON(w, mediaContainerResponse{MediaContainer: container})
+		return
+	}
+	writeXML(w, container)
 }
 
 func sanitizedURL(requestURL *url.URL) string {
@@ -164,107 +368,113 @@ func libraryDirectory() map[string]any {
 	}
 }
 
-func syntheticPart() map[string]any {
-	return map[string]any{
-		"accessible":            true,
-		"exists":                true,
-		"id":                    3001,
-		"key":                   "/library/parts/3001/file.mp4",
-		"duration":              movieDuration,
-		"file":                  "/virtual/WonkPlex-Test-Movie.mp4",
-		"size":                  movieSize,
-		"audioProfile":          "lc",
-		"container":             "mp4",
-		"has64bitOffsets":       false,
-		"indexes":               "sd",
-		"optimizedForStreaming": true,
-		"videoProfile":          "high",
+func boolPointer(value plexBool) *plexBool {
+	return &value
+}
 
-		"Stream": []any{
-			map[string]any{
-				"id":                   4001,
-				"streamType":           1,
-				"default":              true,
-				"codec":                "h264",
-				"index":                0,
-				"height":               1080,
-				"width":                1920,
-				"frameRate":            30.0,
-				"level":                41,
-				"profile":              "high",
-				"streamIdentifier":     "1",
-				"displayTitle":         "1080p",
-				"extendedDisplayTitle": "1080p (H.264)",
+func frameRatePointer(value plexFrameRate) *plexFrameRate {
+	return &value
+}
+
+func syntheticPart() part {
+	return part{
+		ID:                    3001,
+		Key:                   "/library/parts/3001/file.mp4",
+		Duration:              movieDuration,
+		File:                  "/virtual/WonkPlex-Test-Movie.mp4",
+		Size:                  movieSize,
+		Container:             "mp4",
+		Has64BitOffsets:       false,
+		OptimizedForStreaming: true,
+		VideoProfile:          "high",
+		Stream: []stream{
+			{
+				ID:                   4001,
+				StreamType:           1,
+				Default:              true,
+				Codec:                "h264",
+				Index:                0,
+				Bitrate:              196,
+				BitDepth:             8,
+				ChromaLocation:       "left",
+				ChromaSubsampling:    "4:2:0",
+				CodedHeight:          1088,
+				CodedWidth:           1920,
+				FrameRate:            frameRatePointer(30),
+				HasScalingMatrix:     boolPointer(false),
+				Height:               1080,
+				Width:                1920,
+				Level:                41,
+				Profile:              "high",
+				RefFrames:            4,
+				ScanType:             "progressive",
+				StreamIdentifier:     "1",
+				DisplayTitle:         "1080p",
+				ExtendedDisplayTitle: "1080p (H.264)",
 			},
-			map[string]any{
-				"id":                   4002,
-				"streamType":           2,
-				"selected":             true,
-				"default":              true,
-				"codec":                "aac",
-				"index":                1,
-				"channels":             2,
-				"audioChannelLayout":   "stereo",
-				"samplingRate":         48000,
-				"profile":              "lc",
-				"streamIdentifier":     "2",
-				"displayTitle":         "Unknown (AAC Stereo)",
-				"extendedDisplayTitle": "Unknown (AAC Stereo)",
+			{
+				ID:                   4002,
+				StreamType:           2,
+				Selected:             true,
+				Default:              true,
+				Codec:                "aac",
+				Index:                1,
+				Bitrate:              128,
+				Channels:             2,
+				SamplingRate:         48000,
+				StreamIdentifier:     "2",
+				DisplayTitle:         "Unknown (AAC Stereo)",
+				ExtendedDisplayTitle: "Unknown (AAC Stereo)",
 			},
 		},
 	}
 }
 
-func syntheticMedia() map[string]any {
-	return map[string]any{
-		"id":                    2001,
-		"duration":              movieDuration,
-		"bitrate":               movieBitrate,
-		"width":                 1920,
-		"height":                1080,
-		"aspectRatio":           1.78,
-		"audioChannels":         2,
-		"audioCodec":            "aac",
-		"videoCodec":            "h264",
-		"videoResolution":       "1080",
-		"container":             "mp4",
-		"videoFrameRate":        "30p",
-		"optimizedForStreaming": 1,
-		"audioProfile":          "lc",
-		"has64bitOffsets":       false,
-		"videoProfile":          "high",
-		"hasVoiceActivity":      false,
-		"Part": []any{
-			syntheticPart(),
-		},
+func syntheticMedia() media {
+	return media{
+		ID:                    2001,
+		Duration:              movieDuration,
+		Bitrate:               movieBitrate,
+		Width:                 1920,
+		Height:                1080,
+		AspectRatio:           1.78,
+		AudioChannels:         2,
+		AudioCodec:            "aac",
+		VideoCodec:            "h264",
+		VideoResolution:       "1080",
+		Container:             "mp4",
+		VideoFrameRate:        "NTSC",
+		OptimizedForStreaming: 1,
+		Has64BitOffsets:       false,
+		VideoProfile:          "high",
+		HasVoiceActivity:      false,
+		Part:                  []part{syntheticPart()},
 	}
 }
 
-func syntheticMovie() map[string]any {
-	return map[string]any{
-		"ratingKey":             movieRatingKey,
-		"key":                   "/library/metadata/" + movieRatingKey,
-		"guid":                  "wonkplex://movie/" + movieRatingKey,
-		"type":                  "movie",
-		"title":                 movieTitle,
-		"titleSort":             movieTitle,
-		"originalTitle":         movieTitle,
-		"summary":               "A synthetic movie served entirely by WonkPlex.",
-		"year":                  2026,
-		"duration":              movieDuration,
-		"addedAt":               1790899200,
-		"updatedAt":             1790899200,
-		"librarySectionID":      1,
-		"librarySectionKey":     "/library/sections/1",
-		"librarySectionTitle":   libraryName,
-		"librarySectionUUID":    libraryUUID,
-		"contentRating":         "NR",
-		"rating":                8.0,
-		"audienceRating":        8.0,
-		"originallyAvailableAt": "2026-10-01",
-		"Media": []any{
-			syntheticMedia(),
-		},
+func syntheticMovie() movie {
+	return movie{
+		RatingKey:             movieRatingKey,
+		Key:                   "/library/metadata/" + movieRatingKey,
+		GUID:                  "wonkplex://movie/" + movieRatingKey,
+		Type:                  "movie",
+		Title:                 movieTitle,
+		TitleSort:             movieTitle,
+		OriginalTitle:         movieTitle,
+		Summary:               "A synthetic movie served entirely by WonkPlex.",
+		Year:                  2026,
+		Duration:              movieDuration,
+		AddedAt:               1790899200,
+		UpdatedAt:             1790899200,
+		LibrarySectionID:      1,
+		LibrarySectionKey:     "/library/sections/1",
+		LibrarySectionTitle:   libraryName,
+		LibrarySectionUUID:    libraryUUID,
+		ContentRating:         "NR",
+		Rating:                8.0,
+		AudienceRating:        8.0,
+		OriginallyAvailableAt: "2026-10-01",
+		Media:                 []media{syntheticMedia()},
 	}
 }
 
@@ -375,22 +585,22 @@ func writeMovieLibrary(w http.ResponseWriter) {
 	})
 }
 
-func writeMovieMetadata(w http.ResponseWriter) {
-	writeJSON(w, map[string]any{
-		"MediaContainer": map[string]any{
-			"size":                1,
-			"allowSync":           true,
-			"identifier":          "com.plexapp.plugins.library",
-			"librarySectionID":    1,
-			"librarySectionTitle": libraryName,
-			"librarySectionUUID":  libraryUUID,
-			"mediaTagPrefix":      "/system/bundle/media/flags/",
-			"mediaTagVersion":     1,
-			"Metadata": []any{
-				syntheticMovie(),
-			},
-		},
-	})
+func metadataContainer() mediaContainer {
+	return mediaContainer{
+		Size:                1,
+		AllowSync:           true,
+		Identifier:          "com.plexapp.plugins.library",
+		LibrarySectionID:    1,
+		LibrarySectionTitle: libraryName,
+		LibrarySectionUUID:  libraryUUID,
+		MediaTagPrefix:      "/system/bundle/media/flags/",
+		MediaTagVersion:     1,
+		Metadata:            []movie{syntheticMovie()},
+	}
+}
+
+func writeMovieMetadata(w http.ResponseWriter, r *http.Request) {
+	writeNegotiatedMediaContainer(w, r, metadataContainer())
 }
 
 func writeMovieHub(w http.ResponseWriter) {
@@ -416,7 +626,7 @@ func writeMovieHub(w http.ResponseWriter) {
 
 func writePlayQueue(w http.ResponseWriter) {
 	movie := syntheticMovie()
-	movie["playQueueItemID"] = 1
+	movie.PlayQueueItemID = 1
 
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
@@ -435,131 +645,38 @@ func writePlayQueue(w http.ResponseWriter) {
 	})
 }
 
-// This deliberately mirrors the XML structure returned by a real PMS
-// for a successful Direct Play decision.
-func writeDirectPlayDecisionXML(w http.ResponseWriter, r *http.Request) {
-	addCommonHeaders(w)
-	w.Header().Set("Content-Type", "text/xml;charset=utf-8")
-
+func decisionContainer(r *http.Request) mediaContainer {
 	resourceSession := r.URL.Query().Get("X-Plex-Session-Identifier")
 	if resourceSession == "" {
 		resourceSession = r.URL.Query().Get("session")
 	}
 
-	resourceSession = html.EscapeString(resourceSession)
+	videoItem := syntheticMovie()
+	videoItem.Media[0].Selected = boolPointer(true)
+	videoItem.Media[0].Part[0].Decision = "directplay"
+	videoItem.Media[0].Part[0].Selected = boolPointer(true)
+	for index := range videoItem.Media[0].Part[0].Stream {
+		videoItem.Media[0].Part[0].Stream[index].Location = "direct"
+	}
 
-	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
-<MediaContainer size="1"
- allowSync="1"
- identifier="com.plexapp.plugins.library"
- librarySectionID="%s"
- librarySectionTitle="%s"
- librarySectionUUID="%s"
- mdeDecisionCode="1000"
- mdeDecisionText="Direct play OK."
- mediaTagPrefix="/system/bundle/media/flags/"
- mediaTagVersion="1"
- resourceSession="%s">
-<Video
- addedAt="1790899200"
- contentRating="NR"
- duration="%d"
- guid="wonkplex://movie/%s"
- key="/library/metadata/%s"
- librarySectionID="%s"
- librarySectionKey="/library/sections/%s"
- librarySectionTitle="%s"
- originallyAvailableAt="2026-10-01"
- ratingKey="%s"
- title="%s"
- titleSort="%s"
- type="movie"
- updatedAt="1790899200"
- year="2026">
-<Media
- aspectRatio="1.78"
- audioChannels="2"
- audioCodec="aac"
- audioProfile="lc"
- bitrate="%d"
- container="mp4"
- duration="%d"
- height="1080"
- id="2001"
- optimizedForStreaming="1"
- videoCodec="h264"
- videoFrameRate="30p"
- videoProfile="high"
- videoResolution="1080"
- width="1920"
- selected="1">
-<Part
- audioProfile="lc"
- container="mp4"
- duration="%d"
- file="/virtual/WonkPlex-Test-Movie.mp4"
- id="3001"
- key="/library/parts/3001/file.mp4"
- optimizedForStreaming="1"
- size="%d"
- videoProfile="high"
- decision="directplay"
- selected="1">
-<Stream
- codec="h264"
- default="1"
- displayTitle="1080p"
- extendedDisplayTitle="1080p (H.264)"
- frameRate="30.000"
- height="1080"
- id="4001"
- index="0"
- profile="high"
- streamIdentifier="1"
- streamType="1"
- width="1920"
- location="direct" />
-<Stream
- audioChannelLayout="stereo"
- channels="2"
- codec="aac"
- default="1"
- displayTitle="Unknown (AAC Stereo)"
- extendedDisplayTitle="Unknown (AAC Stereo)"
- id="4002"
- index="1"
- profile="lc"
- samplingRate="48000"
- selected="1"
- streamIdentifier="2"
- streamType="2"
- location="direct" />
-</Part>
-</Media>
-</Video>
-</MediaContainer>
-`,
-		libraryID,
-		libraryName,
-		libraryUUID,
-		resourceSession,
-		movieDuration,
-		movieRatingKey,
-		movieRatingKey,
-		libraryID,
-		libraryID,
-		libraryName,
-		movieRatingKey,
-		movieTitle,
-		movieTitle,
-		movieBitrate,
-		movieDuration,
-		movieDuration,
-		movieSize,
-	)
+	return mediaContainer{
+		Size:                1,
+		AllowSync:           true,
+		Identifier:          "com.plexapp.plugins.library",
+		LibrarySectionID:    1,
+		LibrarySectionTitle: libraryName,
+		LibrarySectionUUID:  libraryUUID,
+		MDEDecisionCode:     1000,
+		MDEDecisionText:     "Direct play OK.",
+		MediaTagPrefix:      "/system/bundle/media/flags/",
+		MediaTagVersion:     1,
+		ResourceSession:     resourceSession,
+		Metadata:            []movie{videoItem},
+	}
+}
 
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte(body))
+func writeDirectPlayDecision(w http.ResponseWriter, r *http.Request) {
+	writeNegotiatedMediaContainer(w, r, decisionContainer(r))
 }
 
 func writeEmptyContainer(w http.ResponseWriter) {
@@ -680,7 +797,7 @@ func main() {
 		if handleOptions(w, r) {
 			return
 		}
-		writeMovieMetadata(w)
+		writeMovieMetadata(w, r)
 	})
 
 	http.HandleFunc("/library/metadata/1001/related", func(w http.ResponseWriter, r *http.Request) {
@@ -720,7 +837,7 @@ func main() {
 		if handleOptions(w, r) {
 			return
 		}
-		writeDirectPlayDecisionXML(w, r)
+		writeDirectPlayDecision(w, r)
 	})
 
 	http.HandleFunc("/library/parts/3001/file.mp4", func(w http.ResponseWriter, r *http.Request) {
