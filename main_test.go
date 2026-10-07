@@ -57,13 +57,43 @@ func TestIdentityContentNegotiation(t *testing.T) {
 
 func metadataResponse(t *testing.T, accept string) *httptest.ResponseRecorder {
 	t.Helper()
-	req := httptest.NewRequest(http.MethodGet, "/library/metadata/1001", nil)
+	return metadataResponseForURL(t, "/library/metadata/1001", accept)
+}
+
+func metadataResponseForURL(t *testing.T, requestURL, accept string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, requestURL, nil)
 	if accept != "" {
 		req.Header.Set("Accept", accept)
 	}
 	response := httptest.NewRecorder()
 	writeMovieMetadata(response, req)
 	return response
+}
+
+func TestMetadataIncludesExtrasOnlyWhenRequested(t *testing.T) {
+	for _, accept := range []string{"application/json", "application/xml"} {
+		t.Run(accept, func(t *testing.T) {
+			withExtras := metadataResponseForURL(t, "/library/metadata/1001?includeExtras=1", accept)
+			withoutExtras := metadataResponseForURL(t, "/library/metadata/1001", accept)
+
+			var withContainer, withoutContainer mediaContainer
+			if accept == "application/json" {
+				withContainer = decodeJSONContainer(t, withExtras)
+				withoutContainer = decodeJSONContainer(t, withoutExtras)
+			} else {
+				withContainer = decodeXMLContainer(t, withExtras)
+				withoutContainer = decodeXMLContainer(t, withoutExtras)
+			}
+
+			if got := withContainer.Metadata[0].Extras; got == nil || got.Size != 0 {
+				t.Errorf("Extras with includeExtras=1 = %#v, want empty container", got)
+			}
+			if got := withoutContainer.Metadata[0].Extras; got != nil {
+				t.Errorf("Extras without includeExtras = %#v, want absent", got)
+			}
+		})
+	}
 }
 
 func decisionResponse(t *testing.T, accept string) *httptest.ResponseRecorder {

@@ -121,7 +121,12 @@ type movie struct {
 	AudienceRating        float64 `json:"audienceRating" xml:"audienceRating,attr"`
 	OriginallyAvailableAt string  `json:"originallyAvailableAt" xml:"originallyAvailableAt,attr"`
 	PlayQueueItemID       int     `json:"playQueueItemID,omitempty" xml:"playQueueItemID,attr,omitempty"`
+	Extras                *extras `json:"Extras,omitempty" xml:"Extras,omitempty"`
 	Media                 []media `json:"Media" xml:"Media"`
+}
+
+type extras struct {
+	Size int `json:"size" xml:"size,attr"`
 }
 
 type media struct {
@@ -585,7 +590,12 @@ func writeMovieLibrary(w http.ResponseWriter) {
 	})
 }
 
-func metadataContainer() mediaContainer {
+func metadataContainer(includeExtras bool) mediaContainer {
+	item := syntheticMovie()
+	if includeExtras {
+		item.Extras = &extras{Size: 0}
+	}
+
 	return mediaContainer{
 		Size:                1,
 		AllowSync:           true,
@@ -595,12 +605,12 @@ func metadataContainer() mediaContainer {
 		LibrarySectionUUID:  libraryUUID,
 		MediaTagPrefix:      "/system/bundle/media/flags/",
 		MediaTagVersion:     1,
-		Metadata:            []movie{syntheticMovie()},
+		Metadata:            []movie{item},
 	}
 }
 
 func writeMovieMetadata(w http.ResponseWriter, r *http.Request) {
-	writeNegotiatedMediaContainer(w, r, metadataContainer())
+	writeNegotiatedMediaContainer(w, r, metadataContainer(r.URL.Query().Get("includeExtras") == "1"))
 }
 
 func writeMovieHub(w http.ResponseWriter) {
