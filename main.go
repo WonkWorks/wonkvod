@@ -265,13 +265,62 @@ func writeNegotiatedMediaContainer(w http.ResponseWriter, r *http.Request, conta
 func sanitizedURL(requestURL *url.URL) string {
 	clean := *requestURL
 	query := clean.Query()
-	for key := range query {
+	for key, values := range query {
 		if strings.EqualFold(key, "X-Plex-Token") {
-			query.Set(key, "[REDACTED]")
+			for i := range values {
+				values[i] = "[REDACTED]"
+			}
+		} else {
+			for i := range values {
+				values[i] = redactEmbeddedPlexTokens(values[i])
+			}
 		}
+		query[key] = values
 	}
 	clean.RawQuery = query.Encode()
 	return clean.String()
+}
+
+func redactEmbeddedPlexTokens(value string) string {
+	const tokenName = "x-plex-token"
+	const redaction = "[REDACTED]"
+
+	for searchFrom := 0; searchFrom < len(value); {
+		lowerValue := strings.ToLower(value)
+		relativeStart := strings.Index(lowerValue[searchFrom:], tokenName)
+		if relativeStart < 0 {
+			break
+		}
+
+		nameEnd := searchFrom + relativeStart + len(tokenName)
+		tokenStart := nameEnd
+		switch {
+		case strings.HasPrefix(lowerValue[nameEnd:], "="):
+			tokenStart++
+		case strings.HasPrefix(lowerValue[nameEnd:], "%3d"):
+			tokenStart += len("%3d")
+		default:
+			searchFrom = nameEnd
+			continue
+		}
+
+		tokenEnd := tokenStart
+		for tokenEnd < len(value) {
+			if strings.ContainsRune("&?#; \t\r\n", rune(value[tokenEnd])) {
+				break
+			}
+			remaining := lowerValue[tokenEnd:]
+			if strings.HasPrefix(remaining, "%26") || strings.HasPrefix(remaining, "%3f") || strings.HasPrefix(remaining, "%23") {
+				break
+			}
+			tokenEnd++
+		}
+
+		value = value[:tokenStart] + redaction + value[tokenEnd:]
+		searchFrom = tokenStart + len(redaction)
+	}
+
+	return value
 }
 
 func logRequest(r *http.Request) {

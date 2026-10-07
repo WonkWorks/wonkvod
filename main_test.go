@@ -22,6 +22,24 @@ func TestSanitizedURLRedactsPlexToken(t *testing.T) {
 	}
 }
 
+func TestSanitizedURLRedactsPlexTokenEmbeddedInQueryValue(t *testing.T) {
+	const sensitiveValue = "sensitive-value"
+	for _, requestURL := range []string{
+		"/identity?X-Plex-Playback-Id=playback%3Ffoo%3Dbar%26X-Plex-Token%3D" + sensitiveValue + "%26tail%3D1",
+		"/identity?context=playback%2526X-Plex-Token%253D" + sensitiveValue + "%2526tail%253D1",
+	} {
+		req := httptest.NewRequest(http.MethodGet, requestURL, nil)
+		got := sanitizedURL(req.URL)
+
+		if strings.Contains(got, sensitiveValue) {
+			t.Fatalf("sanitized URL leaked embedded token")
+		}
+		if !strings.Contains(got, "%5BREDACTED%5D") {
+			t.Fatalf("sanitized URL did not contain redaction marker")
+		}
+	}
+}
+
 func TestIdentityContentNegotiation(t *testing.T) {
 	t.Run("json", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/identity", nil)
