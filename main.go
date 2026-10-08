@@ -156,6 +156,8 @@ type part struct {
 	Duration              int       `json:"duration" xml:"duration,attr"`
 	File                  string    `json:"file" xml:"file,attr"`
 	Size                  int       `json:"size" xml:"size,attr"`
+	Accessible            *plexBool `json:"accessible,omitempty" xml:"accessible,attr,omitempty"`
+	Exists                *plexBool `json:"exists,omitempty" xml:"exists,attr,omitempty"`
 	Container             string    `json:"container" xml:"container,attr"`
 	Has64BitOffsets       plexBool  `json:"has64bitOffsets" xml:"has64bitOffsets,attr"`
 	OptimizedForStreaming plexBool  `json:"optimizedForStreaming" xml:"optimizedForStreaming,attr"`
@@ -639,10 +641,14 @@ func writeMovieLibrary(w http.ResponseWriter) {
 	})
 }
 
-func metadataContainer(includeExtras bool) mediaContainer {
+func metadataContainer(includeExtras, checkFiles bool) mediaContainer {
 	item := syntheticMovie()
 	if includeExtras {
 		item.Extras = &extras{Size: 0}
+	}
+	if checkFiles {
+		item.Media[0].Part[0].Accessible = boolPointer(true)
+		item.Media[0].Part[0].Exists = boolPointer(true)
 	}
 
 	return mediaContainer{
@@ -659,7 +665,11 @@ func metadataContainer(includeExtras bool) mediaContainer {
 }
 
 func writeMovieMetadata(w http.ResponseWriter, r *http.Request) {
-	writeNegotiatedMediaContainer(w, r, metadataContainer(r.URL.Query().Get("includeExtras") == "1"))
+	query := r.URL.Query()
+	writeNegotiatedMediaContainer(w, r, metadataContainer(
+		query.Get("includeExtras") == "1",
+		query.Get("checkFiles") == "1",
+	))
 }
 
 func writeMovieHub(w http.ResponseWriter) {

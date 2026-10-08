@@ -114,6 +114,37 @@ func TestMetadataIncludesExtrasOnlyWhenRequested(t *testing.T) {
 	}
 }
 
+func TestMetadataIncludesPartAvailabilityOnlyWhenCheckingFiles(t *testing.T) {
+	for _, accept := range []string{"application/json", "application/xml"} {
+		t.Run(accept, func(t *testing.T) {
+			withCheckFiles := metadataResponseForURL(t, "/library/metadata/1001?checkFiles=1&includeExtras=1&includeOnDeck=1", accept)
+			withoutCheckFiles := metadataResponseForURL(t, "/library/metadata/1001?includeExtras=1&includeOnDeck=1", accept)
+
+			var withContainer, withoutContainer mediaContainer
+			if accept == "application/json" {
+				withContainer = decodeJSONContainer(t, withCheckFiles)
+				withoutContainer = decodeJSONContainer(t, withoutCheckFiles)
+			} else {
+				withContainer = decodeXMLContainer(t, withCheckFiles)
+				withoutContainer = decodeXMLContainer(t, withoutCheckFiles)
+			}
+
+			withPart := withContainer.Metadata[0].Media[0].Part[0]
+			if withPart.Accessible == nil || !bool(*withPart.Accessible) {
+				t.Errorf("Part accessible with checkFiles=1 = %#v, want true", withPart.Accessible)
+			}
+			if withPart.Exists == nil || !bool(*withPart.Exists) {
+				t.Errorf("Part exists with checkFiles=1 = %#v, want true", withPart.Exists)
+			}
+
+			withoutPart := withoutContainer.Metadata[0].Media[0].Part[0]
+			if withoutPart.Accessible != nil || withoutPart.Exists != nil {
+				t.Errorf("Part availability without checkFiles = (%#v, %#v), want absent", withoutPart.Accessible, withoutPart.Exists)
+			}
+		})
+	}
+}
+
 func decisionResponse(t *testing.T, accept string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?session=session-1", nil)
