@@ -45,6 +45,7 @@ const (
 	providerFeatureVariantLibraryActions = "library-actions"
 	providerFeatureVariantSubscribe      = "subscribe"
 	providerFeatureVariantWonkVOD        = "wonkvod"
+	providerFeatureVariantWonkVODFixed   = "wonkvod-timeline-fixed"
 )
 
 var providerFeatureVariants = map[string]bool{
@@ -55,6 +56,7 @@ var providerFeatureVariants = map[string]bool{
 	providerFeatureVariantLibraryActions: true,
 	providerFeatureVariantSubscribe:      true,
 	providerFeatureVariantWonkVOD:        true,
+	providerFeatureVariantWonkVODFixed:   true,
 }
 
 // These token-free fixtures were captured directly from the sacrificial PMS
@@ -144,12 +146,17 @@ func providerFeatureVariantDocument(variant string, includePreferences bool) (ma
 		removeProviderFeatures(provider, "match", "rate", "actions", "playlist", "collection", "manage")
 	case providerFeatureVariantSubscribe:
 		removeProviderFeatures(provider, "subscribe")
-	case providerFeatureVariantWonkVOD:
+	case providerFeatureVariantWonkVOD, providerFeatureVariantWonkVODFixed:
 		wonkDocument, variantErr := providerVariantDocument(providerVariantFeatures, includePreferences)
 		if variantErr != nil {
 			return nil, variantErr
 		}
 		provider["Feature"] = primaryProvider(providerContainer(wonkDocument))["Feature"]
+		if variant == providerFeatureVariantWonkVODFixed {
+			timeline := providerFeature(provider, "timeline")
+			timeline["scrobbleKey"] = "/:/scrobble"
+			timeline["unscrobbleKey"] = "/:/unscrobble"
+		}
 	default:
 		return nil, fmt.Errorf("unsupported provider feature variant %q", variant)
 	}

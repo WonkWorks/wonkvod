@@ -25,6 +25,7 @@ func TestProviderFeatureSubvariantsChangeOnlyFeatureArray(t *testing.T) {
 		{providerFeatureVariantLibraryActions, []string{"match", "rate", "actions", "playlist", "collection", "manage"}},
 		{providerFeatureVariantSubscribe, []string{"subscribe"}},
 		{providerFeatureVariantWonkVOD, []string{"search", "match", "rate", "imagetranscoder", "continuewatching", "actions", "playlist", "collection", "manage", "queryParser", "subscribe", "universalsearch"}},
+		{providerFeatureVariantWonkVODFixed, []string{"search", "match", "rate", "imagetranscoder", "continuewatching", "actions", "playlist", "collection", "manage", "queryParser", "subscribe", "universalsearch"}},
 	}
 	for _, includePreferences := range []bool{false, true} {
 		realBody, _ := realProviderFixture(includePreferences, true)
@@ -109,6 +110,34 @@ func TestProviderFeatureTimelineKeysHasExactRecursiveDiff(t *testing.T) {
 	}
 }
 
+func TestProviderFeatureWonkVODTimelineFixedAddsOnlyTimelineKeys(t *testing.T) {
+	for _, includePreferences := range []bool{false, true} {
+		crashing, err := providerFeatureVariantDocument(providerFeatureVariantWonkVOD, includePreferences)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixed, err := providerFeatureVariantDocument(providerFeatureVariantWonkVODFixed, includePreferences)
+		if err != nil {
+			t.Fatal(err)
+		}
+		crashingTimeline := providerFeature(primaryProvider(providerContainer(crashing)), "timeline")
+		fixedProvider := primaryProvider(providerContainer(fixed))
+		fixedTimeline := providerFeature(fixedProvider, "timeline")
+		if fixedTimeline["key"] != "/:/timeline" || fixedTimeline["type"] != "timeline" ||
+			fixedTimeline["scrobbleKey"] != "/:/scrobble" || fixedTimeline["unscrobbleKey"] != "/:/unscrobble" {
+			t.Fatalf("timeline-fixed feature = %#v", fixedTimeline)
+		}
+		if got := providerFeatureTypes(fixedProvider["Feature"].([]any)); !reflect.DeepEqual(got, []string{"content", "metadata", "promoted", "playqueue", "timeline"}) {
+			t.Fatalf("timeline-fixed feature order = %v", got)
+		}
+		delete(fixedTimeline, "scrobbleKey")
+		delete(fixedTimeline, "unscrobbleKey")
+		if !reflect.DeepEqual(fixed, crashing) || !reflect.DeepEqual(fixedTimeline, crashingTimeline) {
+			t.Fatal("timeline-fixed differs from wonkvod beyond the two restored timeline keys")
+		}
+	}
+}
+
 func TestProviderFeatureSelectorValidationAndNegotiation(t *testing.T) {
 	for variant := range providerFeatureVariants {
 		t.Run(variant, func(t *testing.T) {
@@ -160,7 +189,7 @@ func TestProviderFeatureBisectKeepsStage3Routing(t *testing.T) {
 	if !strings.Contains(trace.String(), `source="wonkvod"`) {
 		t.Fatalf("provider source changed: %s", trace.String())
 	}
-	for _, target := range []string{"/hubs", "/hubs/promoted", "/identity", "/library/metadata/1/related", "/playQueues", "/:/timeline"} {
+	for _, target := range []string{"/hubs", "/hubs/promoted", "/identity", "/library/metadata/1/related", "/playQueues", "/:/timeline", "/:/scrobble", "/:/unscrobble"} {
 		trace.Reset()
 		response := providerRequest(t, traced, target, "application/json")
 		if !strings.Contains(response.Body.String(), `"source":"upstream"`) || !strings.Contains(trace.String(), `source="plex-identity"`) {
