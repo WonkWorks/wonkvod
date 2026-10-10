@@ -692,6 +692,35 @@ func pmsPassthroughLibraryHandler(upstream, mediaPath string) (http.Handler, err
 	}), nil
 }
 
+func pmsPassthroughPresentationHandler(upstream, mediaPath string) (http.Handler, error) {
+	library, err := pmsPassthroughLibraryHandler(upstream, mediaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			library.ServeHTTP(w, r)
+			return
+		}
+
+		switch r.URL.Path {
+		case "/media/providers":
+			writeSacrificialMediaProviders(w, r)
+		case "/hubs":
+			writeSacrificialHomeHubs(w, r)
+		case "/hubs/promoted":
+			writeSacrificialPromotedHubs(w)
+		case "/hubs/continueWatching":
+			writeSacrificialContinueWatchingHub(w)
+		case "/hubs/sections/1":
+			writeSacrificialMovieHub(w)
+		default:
+			library.ServeHTTP(w, r)
+		}
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -716,6 +745,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughLibraryHandler(upstream, testFile)
+	case "passthrough-presentation":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughPresentationHandler(upstream, testFile)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}
@@ -1391,6 +1425,79 @@ func writeMediaProviders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func sacrificialLibraryDirectory(includePreferences bool) map[string]any {
+	directory := map[string]any{
+		"agent":      "tv.plex.agents.movie",
+		"scanner":    "Plex Movie",
+		"language":   "en-US",
+		"refreshing": false,
+		"uuid":       libraryUUID,
+		"id":         libraryID,
+		"key":        "/library/sections/" + libraryID,
+		"hubKey":     "/hubs/sections/" + libraryID,
+		"type":       "movie",
+		"title":      sacrificialLibraryName,
+		"updatedAt":  libraryUpdatedAt,
+		"scannedAt":  libraryScannedAt,
+		"Pivot": []any{
+			map[string]any{
+				"id": "recommended", "key": "/hubs/sections/" + libraryID, "type": "hub",
+				"title": "Recommended", "context": "content.discover", "symbol": "star",
+			},
+			map[string]any{
+				"id": "library", "key": "/library/sections/" + libraryID + "/all?type=1", "type": "list",
+				"title": "Library", "context": "content.library", "symbol": "library",
+			},
+			map[string]any{
+				"id": "categories", "key": "/library/sections/" + libraryID + "/categories", "type": "list",
+				"title": "Categories", "context": "content.categories", "symbol": "stack",
+			},
+		},
+	}
+	if includePreferences {
+		directory["Preferences"] = map[string]any{"Setting": libraryPreferences()}
+	}
+	return directory
+}
+
+func writeSacrificialMediaProviders(w http.ResponseWriter, r *http.Request) {
+	includePreferences := r.URL.Query().Get("includePreferences") == "1"
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":              1,
+			"apiVersion":        apiVersion,
+			"friendlyName":      "WonkVOD",
+			"machineIdentifier": machineID,
+			"version":           version,
+			"platform":          "Linux",
+			"myPlex":            true,
+			"myPlexSigninState": "ok",
+			"MediaProvider": []any{
+				map[string]any{
+					"identifier": "com.plexapp.plugins.library",
+					"title":      "Library",
+					"types":      "video",
+					"protocols":  "stream",
+					"Feature": []any{
+						map[string]any{
+							"key":  "/library/sections",
+							"type": "content",
+							"Directory": []any{
+								map[string]any{"hubKey": "/hubs", "title": "Home"},
+								sacrificialLibraryDirectory(includePreferences),
+							},
+						},
+						map[string]any{"key": "/library/metadata", "type": "metadata"},
+						map[string]any{"key": "/hubs/promoted", "type": "promoted"},
+						map[string]any{"flavor": "universal", "key": "/playQueues", "type": "playqueue"},
+						map[string]any{"key": "/:/timeline", "type": "timeline"},
+					},
+				},
+			},
+		},
+	})
+}
+
 func writeLibrarySections(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
@@ -1824,6 +1931,100 @@ func writeMovieHub(w http.ResponseWriter) {
 			"identifier":          "com.plexapp.plugins.library",
 			"librarySectionID":    1,
 			"librarySectionTitle": libraryName,
+			"librarySectionUUID":  libraryUUID,
+			"Hub":                 hubs,
+		},
+	})
+}
+
+func sacrificialRecentlyAddedMovieHub(home bool) map[string]any {
+	hubIdentifier := "movie.recentlyadded.1"
+	key := "/library/sections/1/all?sort=addedAt:desc"
+	context := "hub.movie.recentlyadded"
+	title := "Recently Added in " + sacrificialLibraryName
+	if home {
+		hubIdentifier = "home.movies.recent"
+		key = "/hubs/home/recentlyAdded?type=1"
+		context = "hub.home.movies.recent"
+		title = "Recently Added Movies"
+	}
+
+	return map[string]any{
+		"context":       context,
+		"hubIdentifier": hubIdentifier,
+		"hubKey":        "/library/metadata/1",
+		"key":           key,
+		"more":          false,
+		"promoted":      true,
+		"size":          1,
+		"style":         "shelf",
+		"title":         title,
+		"type":          "movie",
+		"Metadata":      []any{sacrificialMovieList()},
+	}
+}
+
+func writeSacrificialHomeHubs(w http.ResponseWriter, r *http.Request) {
+	requestedIdentifiers := map[string]bool{}
+	for _, identifier := range strings.Split(r.URL.Query().Get("identifier"), ",") {
+		if identifier != "" {
+			requestedIdentifiers[identifier] = true
+		}
+	}
+	includeAll := len(requestedIdentifiers) == 0
+	hubs := []any{}
+	if includeAll || requestedIdentifiers["home.continue"] {
+		hubs = append(hubs, homeContinueHub())
+	}
+	if includeAll || requestedIdentifiers["home.ondeck"] {
+		hubs = append(hubs, homeOnDeckHub())
+	}
+	if includeAll || requestedIdentifiers["home.movies.recent"] {
+		hubs = append(hubs, sacrificialRecentlyAddedMovieHub(true))
+	}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs,
+		},
+	})
+}
+
+func writeSacrificialPromotedHubs(w http.ResponseWriter) {
+	hubs := []any{homeContinueHub(), homeOnDeckHub(), sacrificialRecentlyAddedMovieHub(false)}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs,
+		},
+	})
+}
+
+func writeSacrificialContinueWatchingHub(w http.ResponseWriter) {
+	hub := map[string]any{
+		"context":       "hub.continueWatching",
+		"hubIdentifier": "continueWatching",
+		"key":           "/hubs/continueWatching/items",
+		"more":          false,
+		"size":          0,
+		"style":         "hero",
+		"title":         "Continue Watching",
+		"type":          "mixed",
+	}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size": 1, "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": []any{hub},
+		},
+	})
+}
+
+func writeSacrificialMovieHub(w http.ResponseWriter) {
+	hubs := []any{sectionContinueWatchingHub(), sacrificialRecentlyAddedMovieHub(false)}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                len(hubs),
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": sacrificialLibraryName,
 			"librarySectionUUID":  libraryUUID,
 			"Hub":                 hubs,
 		},

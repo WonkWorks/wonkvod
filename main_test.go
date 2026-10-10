@@ -651,6 +651,183 @@ func TestPMSPassthroughLibraryModeSelectorAndHealthcheck(t *testing.T) {
 	}
 }
 
+func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *testing.T) {
+	mediaBytes := bytes.Repeat([]byte("wonkvod-stage4-media-"), 300)
+	mediaPath := t.TempDir() + "/test2.mp4"
+	if err := os.WriteFile(mediaPath, mediaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"source":"upstream","method":%q,"path":%q}`, r.Method, r.URL.Path)
+	}))
+	defer upstream.Close()
+	handler, err := pmsPassthroughPresentationHandler(upstream.URL, mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(method, target, accept string, configure func(*http.Request)) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		var traceOutput bytes.Buffer
+		traced := traceRequests(handler, log.New(&traceOutput, "", 0))
+		req := httptest.NewRequest(method, target, nil)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if configure != nil {
+			configure(req)
+		}
+		response := httptest.NewRecorder()
+		traced.ServeHTTP(response, req)
+		return response, traceOutput.String()
+	}
+
+	for _, target := range []string{
+		"/media/providers",
+		"/media/providers?includePreferences=1&includeDetails=1",
+		"/hubs",
+		"/hubs?identifier=home.continue%2Chome.ondeck&includeDetails=1",
+		"/hubs/promoted?includeMeta=1",
+		"/hubs/continueWatching?includeDetails=1",
+		"/hubs/sections/1?includeCollections=1",
+		"/library/sections",
+		"/library/sections/1/firstCharacter?sort=titleSort",
+		"/library/sections/1/all?type=1",
+		"/library/metadata/1?checkFiles=1",
+	} {
+		response, trace := request(http.MethodGet, target, "application/json", nil)
+		if response.Code != http.StatusOK || !json.Valid(response.Body.Bytes()) || !strings.Contains(trace, `source="wonkvod"`) {
+			t.Errorf("Stage 4 owned route %q = status=%d body=%q trace=%s", target, response.Code, response.Body.String(), trace)
+		}
+	}
+
+	providers, _ := request(http.MethodGet, "/media/providers?includePreferences=1", "application/json", nil)
+	providerContainer := responseContainerObject(t, providers)
+	providerValues := requireArray(t, providerContainer["MediaProvider"], "MediaProvider", 1)
+	provider := requireObject(t, providerValues[0], "MediaProvider[0]")
+	features := requireArray(t, provider["Feature"], "Feature", 5)
+	promotedCount := 0
+	featureTypes := map[string]bool{}
+	var content map[string]any
+	for _, value := range features {
+		feature := requireObject(t, value, "Feature")
+		featureType, _ := feature["type"].(string)
+		featureTypes[featureType] = true
+		if featureType == "promoted" {
+			promotedCount++
+		}
+		if featureType == "content" {
+			content = feature
+		}
+	}
+	if promotedCount != 1 {
+		t.Errorf("Stage 4 promoted feature count = %d", promotedCount)
+	}
+	for _, unsupported := range []string{"search", "match", "rate", "imagetranscoder", "continuewatching", "actions", "playlist", "collection", "manage", "queryParser", "subscribe", "universalsearch"} {
+		if featureTypes[unsupported] {
+			t.Errorf("Stage 4 advertised unsupported provider feature %q", unsupported)
+		}
+	}
+	directories := requireArray(t, content["Directory"], "content.Directory", 2)
+	sectionDirectory := requireObject(t, directories[1], "content.Directory[1]")
+	if sectionDirectory["id"] != "1" || sectionDirectory["key"] != "/library/sections/1" ||
+		sectionDirectory["hubKey"] != "/hubs/sections/1" || sectionDirectory["uuid"] != libraryUUID ||
+		sectionDirectory["title"] != sacrificialLibraryName {
+		t.Errorf("Stage 4 provider section identity = %#v", sectionDirectory)
+	}
+	preferences := requireObject(t, sectionDirectory["Preferences"], "section Preferences")
+	_ = requireArray(t, preferences["Setting"], "section Preferences.Setting", 3)
+
+	for _, target := range []string{"/hubs", "/hubs/promoted", "/hubs/sections/1"} {
+		response, _ := request(http.MethodGet, target, "application/json", nil)
+		container := responseContainerObject(t, response)
+		hubs, ok := container["Hub"].([]any)
+		if !ok {
+			t.Fatalf("Hub = %#v, want array", container["Hub"])
+		}
+		for _, value := range hubs {
+			hub := requireObject(t, value, "Hub")
+			metadataValue, present := hub["Metadata"]
+			if !present {
+				continue
+			}
+			metadata := requireArray(t, metadataValue, "Hub.Metadata", 1)
+			item := requireObject(t, metadata[0], "Hub.Metadata[0]")
+			if item["ratingKey"] != "1" || item["key"] != "/library/metadata/1" ||
+				item["thumb"] != sacrificialMovieThumb || item["art"] != sacrificialMovieArt {
+				t.Errorf("Stage 4 hub movie identity for %s = %#v", target, item)
+			}
+			if hub["hubKey"] != "/library/metadata/1" {
+				t.Errorf("Stage 4 hubKey for %s = %#v", target, hub["hubKey"])
+			}
+		}
+	}
+
+	for _, control := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/"},
+		{http.MethodGet, "/identity"},
+		{http.MethodGet, "/library/metadata/1/related"},
+		{http.MethodGet, sacrificialMovieThumb},
+		{http.MethodGet, sacrificialMovieArt},
+		{http.MethodGet, "/photo/:/transcode"},
+		{http.MethodPost, "/playQueues"},
+		{http.MethodGet, "/video/:/transcode/universal/decision"},
+		{http.MethodPut, sacrificialPartPath},
+		{http.MethodGet, "/:/timeline"},
+		{http.MethodGet, "/status/sessions"},
+		{http.MethodGet, "/activities"},
+		{http.MethodGet, "/:/websockets/notifications"},
+		{http.MethodGet, "/hubs/home/recentlyAdded"},
+		{http.MethodGet, "/hubs/sections/2"},
+		{http.MethodPost, "/media/providers"},
+	} {
+		response, trace := request(control.method, control.path, "application/json", nil)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"upstream"`) ||
+			!strings.Contains(trace, `source="plex-identity"`) {
+			t.Errorf("Stage 4 control route %s %s was not proxied: status=%d body=%q trace=%s", control.method, control.path, response.Code, response.Body.String(), trace)
+		}
+	}
+
+	const token = "stage4-sensitive-token"
+	ranged, rangeTrace := request(http.MethodGet, sacrificialPartPath+"?X-Plex-Token="+token, "video/mp4", func(req *http.Request) {
+		req.Header.Set("Range", "bytes=100-199")
+	})
+	if ranged.Code != http.StatusPartialContent || ranged.Header().Get("Content-Range") != fmt.Sprintf("bytes 100-199/%d", len(mediaBytes)) ||
+		!bytes.Equal(ranged.Body.Bytes(), mediaBytes[100:200]) || !strings.Contains(rangeTrace, `source="wonkvod"`) ||
+		strings.Contains(rangeTrace, token) || !strings.Contains(rangeTrace, "[REDACTED]") {
+		t.Errorf("Stage 4 Part Range = status %d headers %#v trace=%s", ranged.Code, ranged.Header(), rangeTrace)
+	}
+	head, headTrace := request(http.MethodHead, sacrificialPartPath, "", nil)
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != fmt.Sprint(len(mediaBytes)) || !strings.Contains(headTrace, `source="wonkvod"`) {
+		t.Errorf("Stage 4 Part HEAD = status %d headers %#v bytes=%d trace=%s", head.Code, head.Header(), head.Body.Len(), headTrace)
+	}
+	full, fullTrace := request(http.MethodGet, sacrificialPartPath, "", nil)
+	if full.Code != http.StatusOK || !bytes.Equal(full.Body.Bytes(), mediaBytes) || !strings.Contains(fullTrace, `source="wonkvod"`) {
+		t.Errorf("Stage 4 Part full GET = status %d bytes=%d trace=%s", full.Code, full.Body.Len(), fullTrace)
+	}
+}
+
+func TestPMSPassthroughPresentationModeSelectorAndHealthcheck(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"machineIdentifier":"` + machineID + `"}}`))
+	}))
+	defer upstream.Close()
+	handler, err := handlerForPMSMode("passthrough-presentation", upstream.URL, http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/identity", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
+		t.Fatalf("passthrough-presentation health response = status %d body %q", response.Code, response.Body.String())
+	}
+}
+
 func assertSacrificialIdentity(t *testing.T, item movie) {
 	t.Helper()
 	if item.RatingKey != "1" || item.Key != "/library/metadata/1" || item.GUID != sacrificialMovieGUID ||
