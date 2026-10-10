@@ -338,6 +338,78 @@ func TestRealPMSPresentationMetadataAlignment(t *testing.T) {
 	}
 }
 
+func TestLibraryUUIDIsStableAndConsistentAcrossResponses(t *testing.T) {
+	const oldLibraryUUID = "wonkplex-test-movies-0001"
+	const expectedLibraryUUID = "8212ee84-76af-4cf3-8ec3-58b81b52ce9f"
+	if libraryUUID != expectedLibraryUUID {
+		t.Fatalf("libraryUUID = %q, want stable fixture UUID %q", libraryUUID, expectedLibraryUUID)
+	}
+	if !regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(libraryUUID) {
+		t.Fatalf("libraryUUID is not an RFC 4122 version 4 UUID: %q", libraryUUID)
+	}
+
+	responses := map[string]*httptest.ResponseRecorder{}
+	record := func(name string, writer func(http.ResponseWriter)) {
+		response := httptest.NewRecorder()
+		writer(response)
+		responses[name] = response
+	}
+	record("providers", writeMediaProviders)
+	record("sections", writeLibrarySections)
+	record("section detail", writeLibrarySection)
+	record("movie list", writeMovieLibrary)
+	record("movie detail", func(w http.ResponseWriter) {
+		request := httptest.NewRequest(http.MethodGet, "/library/metadata/1001?checkFiles=1&includeExtras=1", nil)
+		request.Header.Set("Accept", "application/json")
+		writeMovieMetadata(w, request)
+	})
+	record("promoted hubs", writePromotedHubs)
+	record("section hubs", writeMovieHub)
+	record("play queue", writePlayQueue)
+	record("decision", func(w http.ResponseWriter) {
+		request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision", nil)
+		request.Header.Set("Accept", "application/json")
+		writeDirectPlayDecision(w, request)
+	})
+	record("movie navigation", writeEmptyMovieNavigation)
+	record("directory navigation", writeEmptyDirectoryNavigation)
+
+	totalUUIDFields := 0
+	for name, response := range responses {
+		body := response.Body.String()
+		if strings.Contains(body, oldLibraryUUID) {
+			t.Errorf("%s response contains old synthetic UUID", name)
+		}
+		var document any
+		if err := json.Unmarshal(response.Body.Bytes(), &document); err != nil {
+			t.Fatalf("decode %s response: %v", name, err)
+		}
+		var inspect func(any)
+		inspect = func(value any) {
+			switch value := value.(type) {
+			case map[string]any:
+				for key, child := range value {
+					if key == "uuid" || key == "librarySectionUUID" {
+						totalUUIDFields++
+						if child != libraryUUID {
+							t.Errorf("%s %s = %#v, want %q", name, key, child, libraryUUID)
+						}
+					}
+					inspect(child)
+				}
+			case []any:
+				for _, child := range value {
+					inspect(child)
+				}
+			}
+		}
+		inspect(document)
+	}
+	if totalUUIDFields == 0 {
+		t.Fatal("no emitted library UUID fields were inspected")
+	}
+}
+
 func jsonKind(value any) string {
 	switch value := value.(type) {
 	case bool:

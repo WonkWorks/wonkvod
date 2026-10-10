@@ -29,7 +29,7 @@ const (
 	apiVersion = "1.2.2"
 
 	libraryID   = "1"
-	libraryUUID = "wonkplex-test-movies-0001"
+	libraryUUID = "8212ee84-76af-4cf3-8ec3-58b81b52ce9f"
 	libraryName = "WonkVOD Movies"
 
 	movieRatingKey = "1001"
