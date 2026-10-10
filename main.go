@@ -1,9 +1,13 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"log"
 	"mime"
 	"net/http"
@@ -27,6 +31,10 @@ const (
 
 	movieRatingKey = "1001"
 	movieTitle     = "WonkVOD Test Movie"
+	movieAddedAt   = 1790899200
+	movieUpdatedAt = 1790899200
+	movieThumbPath = "/library/metadata/1001/thumb/1790899200"
+	movieArtPath   = "/library/metadata/1001/art/1790899200"
 
 	testFile = "/opt/plex-identity/test2.mp4"
 
@@ -87,6 +95,13 @@ type mediaContainer struct {
 	LibrarySectionID    int      `json:"librarySectionID" xml:"librarySectionID,attr"`
 	LibrarySectionTitle string   `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
 	LibrarySectionUUID  string   `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
+	TotalSize           int      `json:"totalSize,omitempty" xml:"totalSize,attr,omitempty"`
+	Art                 string   `json:"art,omitempty" xml:"art,attr,omitempty"`
+	Thumb               string   `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
+	Title1              string   `json:"title1,omitempty" xml:"title1,attr,omitempty"`
+	Title2              string   `json:"title2,omitempty" xml:"title2,attr,omitempty"`
+	ViewGroup           string   `json:"viewGroup,omitempty" xml:"viewGroup,attr,omitempty"`
+	ViewMode            int      `json:"viewMode,omitempty" xml:"viewMode,attr,omitempty"`
 	MDEDecisionCode     int      `json:"mdeDecisionCode,omitempty" xml:"mdeDecisionCode,attr,omitempty"`
 	MDEDecisionText     string   `json:"mdeDecisionText,omitempty" xml:"mdeDecisionText,attr,omitempty"`
 	MediaTagPrefix      string   `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
@@ -100,29 +115,60 @@ type mediaContainerResponse struct {
 }
 
 type movie struct {
-	RatingKey             string  `json:"ratingKey" xml:"ratingKey,attr"`
-	Key                   string  `json:"key" xml:"key,attr"`
-	GUID                  string  `json:"guid" xml:"guid,attr"`
-	Type                  string  `json:"type" xml:"type,attr"`
-	Title                 string  `json:"title" xml:"title,attr"`
-	TitleSort             string  `json:"titleSort" xml:"titleSort,attr"`
-	OriginalTitle         string  `json:"originalTitle" xml:"originalTitle,attr"`
-	Summary               string  `json:"summary" xml:"summary,attr"`
-	Year                  int     `json:"year" xml:"year,attr"`
-	Duration              int     `json:"duration" xml:"duration,attr"`
-	AddedAt               int64   `json:"addedAt" xml:"addedAt,attr"`
-	UpdatedAt             int64   `json:"updatedAt" xml:"updatedAt,attr"`
-	LibrarySectionID      int     `json:"librarySectionID" xml:"librarySectionID,attr"`
-	LibrarySectionKey     string  `json:"librarySectionKey" xml:"librarySectionKey,attr"`
-	LibrarySectionTitle   string  `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
-	LibrarySectionUUID    string  `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
-	ContentRating         string  `json:"contentRating" xml:"contentRating,attr"`
-	Rating                float64 `json:"rating" xml:"rating,attr"`
-	AudienceRating        float64 `json:"audienceRating" xml:"audienceRating,attr"`
-	OriginallyAvailableAt string  `json:"originallyAvailableAt" xml:"originallyAvailableAt,attr"`
-	PlayQueueItemID       int     `json:"playQueueItemID,omitempty" xml:"playQueueItemID,attr,omitempty"`
-	Extras                *extras `json:"Extras,omitempty" xml:"Extras,omitempty"`
-	Media                 []media `json:"Media" xml:"Media"`
+	RatingKey             string           `json:"ratingKey" xml:"ratingKey,attr"`
+	Key                   string           `json:"key" xml:"key,attr"`
+	GUID                  string           `json:"guid" xml:"guid,attr"`
+	Type                  string           `json:"type" xml:"type,attr"`
+	Title                 string           `json:"title" xml:"title,attr"`
+	TitleSort             string           `json:"titleSort,omitempty" xml:"titleSort,attr,omitempty"`
+	OriginalTitle         string           `json:"originalTitle,omitempty" xml:"originalTitle,attr,omitempty"`
+	Slug                  string           `json:"slug" xml:"slug,attr"`
+	Thumb                 string           `json:"thumb" xml:"thumb,attr"`
+	Art                   string           `json:"art" xml:"art,attr"`
+	Summary               string           `json:"summary" xml:"summary,attr"`
+	Year                  int              `json:"year" xml:"year,attr"`
+	Duration              int              `json:"duration" xml:"duration,attr"`
+	AddedAt               int64            `json:"addedAt" xml:"addedAt,attr"`
+	UpdatedAt             int64            `json:"updatedAt" xml:"updatedAt,attr"`
+	LibrarySectionID      int              `json:"librarySectionID,omitempty" xml:"librarySectionID,attr,omitempty"`
+	LibrarySectionKey     string           `json:"librarySectionKey,omitempty" xml:"librarySectionKey,attr,omitempty"`
+	LibrarySectionTitle   string           `json:"librarySectionTitle,omitempty" xml:"librarySectionTitle,attr,omitempty"`
+	LibrarySectionUUID    string           `json:"librarySectionUUID,omitempty" xml:"librarySectionUUID,attr,omitempty"`
+	ContentRating         string           `json:"contentRating" xml:"contentRating,attr"`
+	Rating                float64          `json:"rating" xml:"rating,attr"`
+	AudienceRating        float64          `json:"audienceRating" xml:"audienceRating,attr"`
+	AudienceRatingImage   string           `json:"audienceRatingImage" xml:"audienceRatingImage,attr"`
+	OriginallyAvailableAt string           `json:"originallyAvailableAt" xml:"originallyAvailableAt,attr"`
+	PlayQueueItemID       int              `json:"playQueueItemID,omitempty" xml:"playQueueItemID,attr,omitempty"`
+	UltraBlurColors       *ultraBlurColors `json:"UltraBlurColors,omitempty" xml:"UltraBlurColors,omitempty"`
+	Images                []plexImage      `json:"Image,omitempty" xml:"Image,omitempty"`
+	Guids                 []plexGuid       `json:"Guid,omitempty" xml:"Guid,omitempty"`
+	Ratings               []plexRating     `json:"Rating,omitempty" xml:"Rating,omitempty"`
+	Extras                *extras          `json:"Extras,omitempty" xml:"Extras,omitempty"`
+	Media                 []media          `json:"Media" xml:"Media"`
+}
+
+type ultraBlurColors struct {
+	TopLeft     string `json:"topLeft" xml:"topLeft,attr"`
+	TopRight    string `json:"topRight" xml:"topRight,attr"`
+	BottomRight string `json:"bottomRight" xml:"bottomRight,attr"`
+	BottomLeft  string `json:"bottomLeft" xml:"bottomLeft,attr"`
+}
+
+type plexImage struct {
+	Alt  string `json:"alt" xml:"alt,attr"`
+	Type string `json:"type" xml:"type,attr"`
+	URL  string `json:"url" xml:"url,attr"`
+}
+
+type plexGuid struct {
+	ID string `json:"id" xml:"id,attr"`
+}
+
+type plexRating struct {
+	Image string  `json:"image" xml:"image,attr"`
+	Type  string  `json:"type" xml:"type,attr"`
+	Value float64 `json:"value" xml:"value,attr"`
 }
 
 type extras struct {
@@ -164,7 +210,7 @@ type part struct {
 	VideoProfile          string    `json:"videoProfile" xml:"videoProfile,attr"`
 	Decision              string    `json:"decision,omitempty" xml:"decision,attr,omitempty"`
 	Selected              *plexBool `json:"selected,omitempty" xml:"selected,attr,omitempty"`
-	Stream                []stream  `json:"Stream" xml:"Stream"`
+	Stream                []stream  `json:"Stream,omitempty" xml:"Stream,omitempty"`
 }
 
 type stream struct {
@@ -508,6 +554,24 @@ func syntheticMedia() media {
 	}
 }
 
+func cloneMovie(source movie) movie {
+	clone := source
+	clone.Images = append([]plexImage(nil), source.Images...)
+	clone.Guids = append([]plexGuid(nil), source.Guids...)
+	clone.Ratings = append([]plexRating(nil), source.Ratings...)
+	clone.Media = append([]media(nil), source.Media...)
+	for mediaIndex := range clone.Media {
+		clone.Media[mediaIndex].Part = append([]part(nil), source.Media[mediaIndex].Part...)
+		for partIndex := range clone.Media[mediaIndex].Part {
+			clone.Media[mediaIndex].Part[partIndex].Stream = append(
+				[]stream(nil),
+				source.Media[mediaIndex].Part[partIndex].Stream...,
+			)
+		}
+	}
+	return clone
+}
+
 func syntheticMovie() movie {
 	return movie{
 		RatingKey:             movieRatingKey,
@@ -517,11 +581,14 @@ func syntheticMovie() movie {
 		Title:                 movieTitle,
 		TitleSort:             movieTitle,
 		OriginalTitle:         movieTitle,
+		Slug:                  "wonkvod-test-movie",
+		Thumb:                 movieThumbPath,
+		Art:                   movieArtPath,
 		Summary:               "A synthetic movie served entirely by WonkVOD.",
 		Year:                  2026,
 		Duration:              movieDuration,
-		AddedAt:               1790899200,
-		UpdatedAt:             1790899200,
+		AddedAt:               movieAddedAt,
+		UpdatedAt:             movieUpdatedAt,
 		LibrarySectionID:      1,
 		LibrarySectionKey:     "/library/sections/1",
 		LibrarySectionTitle:   libraryName,
@@ -529,9 +596,140 @@ func syntheticMovie() movie {
 		ContentRating:         "NR",
 		Rating:                8.0,
 		AudienceRating:        8.0,
+		AudienceRatingImage:   "themoviedb://image.rating",
 		OriginallyAvailableAt: "2026-10-01",
-		Media:                 []media{syntheticMedia()},
+		UltraBlurColors: &ultraBlurColors{
+			TopLeft:     "14213d",
+			TopRight:    "355070",
+			BottomRight: "6d597a",
+			BottomLeft:  "1b263b",
+		},
+		Images: []plexImage{
+			{Alt: movieTitle, Type: "coverPoster", URL: movieThumbPath},
+			{Alt: movieTitle, Type: "background", URL: movieArtPath},
+		},
+		Guids: []plexGuid{
+			{ID: "tmdb://601860"},
+		},
+		Ratings: []plexRating{
+			{Image: "themoviedb://image.rating", Type: "audience", Value: 8.0},
+		},
+		Media: []media{syntheticMedia()},
 	}
+}
+
+func syntheticMovieList() movie {
+	item := cloneMovie(syntheticMovie())
+	item.TitleSort = ""
+	item.OriginalTitle = ""
+	item.LibrarySectionID = 0
+	item.LibrarySectionKey = ""
+	item.LibrarySectionTitle = ""
+	item.LibrarySectionUUID = ""
+	item.Guids = nil
+	item.Ratings = nil
+	item.Extras = nil
+	for mediaIndex := range item.Media {
+		for partIndex := range item.Media[mediaIndex].Part {
+			item.Media[mediaIndex].Part[partIndex].Accessible = nil
+			item.Media[mediaIndex].Part[partIndex].Exists = nil
+			item.Media[mediaIndex].Part[partIndex].Stream = nil
+		}
+	}
+	return item
+}
+
+func syntheticMovieDetail(includeExtras, checkFiles bool) movie {
+	item := cloneMovie(syntheticMovie())
+	if includeExtras {
+		item.Extras = &extras{Size: 0}
+	}
+	if checkFiles {
+		item.Media[0].Part[0].Accessible = boolPointer(true)
+		item.Media[0].Part[0].Exists = boolPointer(true)
+	}
+	return item
+}
+
+func generateArtwork(width, height int, top, bottom, accent color.RGBA) []byte {
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		denominator := height - 1
+		if denominator < 1 {
+			denominator = 1
+		}
+		blend := func(start, end uint8) uint8 {
+			return uint8((int(start)*(denominator-y) + int(end)*y) / denominator)
+		}
+		rowColor := color.RGBA{
+			R: blend(top.R, bottom.R),
+			G: blend(top.G, bottom.G),
+			B: blend(top.B, bottom.B),
+			A: 255,
+		}
+		for x := 0; x < width; x++ {
+			canvas.SetRGBA(x, y, rowColor)
+		}
+	}
+
+	bandTop := height * 2 / 5
+	bandBottom := height * 3 / 5
+	for y := bandTop; y < bandBottom; y++ {
+		for x := width / 10; x < width*9/10; x++ {
+			canvas.SetRGBA(x, y, accent)
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, canvas); err != nil {
+		panic(err)
+	}
+	return encoded.Bytes()
+}
+
+var (
+	posterArtwork = generateArtwork(
+		600,
+		900,
+		color.RGBA{R: 20, G: 33, B: 61, A: 255},
+		color.RGBA{R: 109, G: 89, B: 122, A: 255},
+		color.RGBA{R: 234, G: 172, B: 139, A: 255},
+	)
+	backgroundArtwork = generateArtwork(
+		1280,
+		720,
+		color.RGBA{R: 15, G: 25, B: 48, A: 255},
+		color.RGBA{R: 53, G: 80, B: 112, A: 255},
+		color.RGBA{R: 181, G: 101, B: 118, A: 255},
+	)
+)
+
+func artworkForPath(path string) ([]byte, bool) {
+	switch {
+	case path == "/:/resources/movie.png", strings.HasPrefix(path, "/library/metadata/1001/thumb/"):
+		return posterArtwork, true
+	case path == "/:/resources/movie-fanart.jpg", strings.HasPrefix(path, "/library/metadata/1001/art/"):
+		return backgroundArtwork, true
+	default:
+		return nil, false
+	}
+}
+
+func writeArtwork(w http.ResponseWriter, r *http.Request) {
+	artwork, ok := artworkForPath(r.URL.Path)
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	addCommonHeaders(w)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(artwork)))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = w.Write(artwork)
 }
 
 func writeRoot(w http.ResponseWriter) {
@@ -624,33 +822,32 @@ func writeLibrarySection(w http.ResponseWriter) {
 	})
 }
 
+func movieLibraryContainer() mediaContainer {
+	return mediaContainer{
+		Size:                1,
+		TotalSize:           1,
+		AllowSync:           true,
+		Identifier:          "com.plexapp.plugins.library",
+		LibrarySectionID:    1,
+		LibrarySectionTitle: libraryName,
+		LibrarySectionUUID:  libraryUUID,
+		MediaTagPrefix:      "/system/bundle/media/flags/",
+		MediaTagVersion:     1,
+		Art:                 "/:/resources/movie-fanart.jpg",
+		Thumb:               "/:/resources/movie.png",
+		Title1:              libraryName,
+		Title2:              "All " + libraryName,
+		ViewGroup:           "movie",
+		ViewMode:            65592,
+		Metadata:            []movie{syntheticMovieList()},
+	}
+}
+
 func writeMovieLibrary(w http.ResponseWriter) {
-	writeJSON(w, map[string]any{
-		"MediaContainer": map[string]any{
-			"size":                1,
-			"totalSize":           1,
-			"librarySectionID":    1,
-			"librarySectionTitle": libraryName,
-			"librarySectionUUID":  libraryUUID,
-			"viewGroup":           "movie",
-			"viewMode":            65592,
-			"Metadata": []any{
-				syntheticMovie(),
-			},
-		},
-	})
+	writeJSON(w, mediaContainerResponse{MediaContainer: movieLibraryContainer()})
 }
 
 func metadataContainer(includeExtras, checkFiles bool) mediaContainer {
-	item := syntheticMovie()
-	if includeExtras {
-		item.Extras = &extras{Size: 0}
-	}
-	if checkFiles {
-		item.Media[0].Part[0].Accessible = boolPointer(true)
-		item.Media[0].Part[0].Exists = boolPointer(true)
-	}
-
 	return mediaContainer{
 		Size:                1,
 		AllowSync:           true,
@@ -660,7 +857,7 @@ func metadataContainer(includeExtras, checkFiles bool) mediaContainer {
 		LibrarySectionUUID:  libraryUUID,
 		MediaTagPrefix:      "/system/bundle/media/flags/",
 		MediaTagVersion:     1,
-		Metadata:            []movie{item},
+		Metadata:            []movie{syntheticMovieDetail(includeExtras, checkFiles)},
 	}
 }
 
@@ -685,7 +882,7 @@ func writeMovieHub(w http.ResponseWriter) {
 					"size":          1,
 					"more":          false,
 					"Metadata": []any{
-						syntheticMovie(),
+						syntheticMovieList(),
 					},
 				},
 			},
@@ -805,6 +1002,22 @@ func main() {
 		writeMediaProviders(w)
 	})
 
+	http.HandleFunc("/:/resources/movie.png", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writeArtwork(w, r)
+	})
+
+	http.HandleFunc("/:/resources/movie-fanart.jpg", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writeArtwork(w, r)
+	})
+
 	http.HandleFunc("/library/sections", func(w http.ResponseWriter, r *http.Request) {
 		logRequest(r)
 		if handleOptions(w, r) {
@@ -867,6 +1080,22 @@ func main() {
 			return
 		}
 		writeMovieMetadata(w, r)
+	})
+
+	http.HandleFunc("/library/metadata/1001/thumb/", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writeArtwork(w, r)
+	})
+
+	http.HandleFunc("/library/metadata/1001/art/", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writeArtwork(w, r)
 	})
 
 	http.HandleFunc("/library/metadata/1001/related", func(w http.ResponseWriter, r *http.Request) {

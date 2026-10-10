@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"image"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -142,6 +144,130 @@ func TestMetadataIncludesPartAvailabilityOnlyWhenCheckingFiles(t *testing.T) {
 				t.Errorf("Part availability without checkFiles = (%#v, %#v), want absent", withoutPart.Accessible, withoutPart.Exists)
 			}
 		})
+	}
+}
+
+func TestRichMovieDetailShape(t *testing.T) {
+	for _, accept := range []string{"application/json", "application/xml"} {
+		t.Run(accept, func(t *testing.T) {
+			response := metadataResponseForURL(t, "/library/metadata/1001?checkFiles=1&includeExtras=1&includeOnDeck=1", accept)
+			var container mediaContainer
+			if accept == "application/json" {
+				container = decodeJSONContainer(t, response)
+			} else {
+				container = decodeXMLContainer(t, response)
+			}
+
+			if len(container.Metadata) != 1 {
+				t.Fatalf("metadata count = %d", len(container.Metadata))
+			}
+			item := container.Metadata[0]
+			if item.Thumb != movieThumbPath || item.Art != movieArtPath || item.Slug == "" {
+				t.Errorf("presentation paths/slug = (%q, %q, %q)", item.Thumb, item.Art, item.Slug)
+			}
+			if item.UltraBlurColors == nil || len(item.Images) != 2 {
+				t.Errorf("presentation objects = colors:%#v images:%#v", item.UltraBlurColors, item.Images)
+			}
+			if len(item.Guids) != 1 || item.Guids[0].ID != "tmdb://601860" {
+				t.Errorf("Guid = %#v", item.Guids)
+			}
+			if len(item.Ratings) != 1 || item.Ratings[0].Type != "audience" || item.Ratings[0].Value != 8.0 {
+				t.Errorf("Rating = %#v", item.Ratings)
+			}
+			if item.AudienceRatingImage != "themoviedb://image.rating" {
+				t.Errorf("audienceRatingImage = %q", item.AudienceRatingImage)
+			}
+			if item.Year != 2026 || item.OriginallyAvailableAt != "2026-10-01" || item.ContentRating != "NR" {
+				t.Errorf("release metadata = (%d, %q, %q)", item.Year, item.OriginallyAvailableAt, item.ContentRating)
+			}
+			if item.LibrarySectionID != 1 || item.LibrarySectionKey != "/library/sections/1" || item.LibrarySectionTitle != libraryName {
+				t.Errorf("library section metadata = (%d, %q, %q)", item.LibrarySectionID, item.LibrarySectionKey, item.LibrarySectionTitle)
+			}
+			if item.Extras == nil || item.Extras.Size != 0 {
+				t.Errorf("Extras = %#v", item.Extras)
+			}
+			coreSemantics(t, container)
+		})
+	}
+}
+
+func TestMovieListAndDetailProjectionsDifferLikePMS(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeMovieLibrary(response)
+	listContainer := decodeJSONContainer(t, response)
+	detailContainer := metadataContainer(true, true)
+
+	listItem := listContainer.Metadata[0]
+	detailItem := detailContainer.Metadata[0]
+	if len(listItem.Guids) != 0 || len(listItem.Ratings) != 0 || listItem.Extras != nil {
+		t.Errorf("list contains detail-only structures: %#v", listItem)
+	}
+	if listItem.LibrarySectionID != 0 || listItem.LibrarySectionKey != "" || listItem.LibrarySectionTitle != "" {
+		t.Errorf("list contains item-level library section fields: %#v", listItem)
+	}
+	if got := len(listItem.Media[0].Part[0].Stream); got != 0 {
+		t.Errorf("list stream count = %d, want 0", got)
+	}
+	if listItem.Media[0].Part[0].Accessible != nil || listItem.Media[0].Part[0].Exists != nil {
+		t.Error("list Part contains checkFiles availability")
+	}
+	if len(detailItem.Guids) != 1 || len(detailItem.Ratings) != 1 || detailItem.Extras == nil {
+		t.Errorf("detail structures missing: %#v", detailItem)
+	}
+	if got := len(detailItem.Media[0].Part[0].Stream); got != 2 {
+		t.Errorf("detail stream count = %d, want 2", got)
+	}
+	if len(listItem.Images) != 2 || listItem.UltraBlurColors == nil || len(detailItem.Images) != 2 || detailItem.UltraBlurColors == nil {
+		t.Error("list/detail presentation metadata is incomplete")
+	}
+}
+
+func TestEveryAdvertisedArtworkPathReturnsValidImage(t *testing.T) {
+	listContainer := movieLibraryContainer()
+	detail := syntheticMovieDetail(true, true)
+	paths := map[string]bool{
+		listContainer.Thumb: true,
+		listContainer.Art:   true,
+		detail.Thumb:        true,
+		detail.Art:          true,
+	}
+	for _, descriptor := range detail.Images {
+		paths[descriptor.URL] = true
+	}
+
+	for path := range paths {
+		t.Run(path, func(t *testing.T) {
+			if _, ok := artworkForPath(path); !ok {
+				t.Fatalf("advertised artwork path has no asset: %s", path)
+			}
+			request := httptest.NewRequest(http.MethodGet, path, nil)
+			response := httptest.NewRecorder()
+			writeArtwork(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d", response.Code)
+			}
+			if got := response.Header().Get("Content-Type"); got != "image/png" {
+				t.Fatalf("Content-Type = %q", got)
+			}
+			configuration, format, err := image.DecodeConfig(bytes.NewReader(response.Body.Bytes()))
+			if err != nil {
+				t.Fatalf("invalid image: %v", err)
+			}
+			if format != "png" || configuration.Width < 600 || configuration.Height < 450 {
+				t.Fatalf("image = %s %dx%d", format, configuration.Width, configuration.Height)
+			}
+			if got := response.Header().Get("Access-Control-Allow-Origin"); got != "*" {
+				t.Errorf("Access-Control-Allow-Origin = %q", got)
+			}
+		})
+	}
+
+	headRequest := httptest.NewRequest(http.MethodHead, movieThumbPath, nil)
+	headResponse := httptest.NewRecorder()
+	writeArtwork(headResponse, headRequest)
+	if headResponse.Code != http.StatusOK || headResponse.Body.Len() != 0 || headResponse.Header().Get("Content-Length") == "" {
+		t.Errorf("artwork HEAD response = status:%d bytes:%d length:%q", headResponse.Code, headResponse.Body.Len(), headResponse.Header().Get("Content-Length"))
 	}
 }
 
