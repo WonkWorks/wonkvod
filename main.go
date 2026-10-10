@@ -643,6 +643,55 @@ func pmsPassthroughMetadataHandler(upstream, mediaPath string) (http.Handler, er
 	}), nil
 }
 
+func pmsPassthroughLibraryHandler(upstream, mediaPath string) (http.Handler, error) {
+	metadata, err := pmsPassthroughMetadataHandler(upstream, mediaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	movieNavigation := map[string]bool{
+		"/library/sections/1/unwatched":      true,
+		"/library/sections/1/newest":         true,
+		"/library/sections/1/recentlyAdded":  true,
+		"/library/sections/1/recentlyViewed": true,
+		"/library/sections/1/onDeck":         true,
+		"/library/sections/1/search":         true,
+	}
+	directoryNavigation := map[string]bool{
+		"/library/sections/1/collection": true,
+		"/library/sections/1/genre":      true,
+		"/library/sections/1/year":       true,
+		"/library/sections/1/director":   true,
+		"/library/sections/1/actor":      true,
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			metadata.ServeHTTP(w, r)
+			return
+		}
+
+		switch {
+		case r.URL.Path == "/library/sections":
+			writeSacrificialLibrarySections(w)
+		case r.URL.Path == "/library/sections/1":
+			writeSacrificialLibrarySection(w)
+		case r.URL.Path == "/library/sections/1/prefs":
+			writeLibrarySectionPrefs(w)
+		case r.URL.Path == "/library/sections/1/firstCharacter":
+			writeSacrificialFirstCharacter(w)
+		case r.URL.Path == "/library/sections/1/categories":
+			writeEmptyContainer(w)
+		case movieNavigation[r.URL.Path]:
+			writeSacrificialEmptyMovieNavigation(w)
+		case directoryNavigation[r.URL.Path]:
+			writeSacrificialEmptyDirectoryNavigation(w)
+		default:
+			metadata.ServeHTTP(w, r)
+		}
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -662,6 +711,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughMetadataHandler(upstream, testFile)
+	case "passthrough-library":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughLibraryHandler(upstream, testFile)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}
@@ -1444,6 +1498,127 @@ func writeLibrarySectionPrefs(w http.ResponseWriter) {
 		"MediaContainer": map[string]any{
 			"size":    len(settings),
 			"Setting": settings,
+		},
+	})
+}
+
+func sacrificialLibraryDirectories() []any {
+	return []any{
+		map[string]any{"key": "all", "title": "All " + sacrificialLibraryName},
+		map[string]any{"key": "unwatched", "title": "Unwatched"},
+		map[string]any{"key": "newest", "title": "Recently Released"},
+		map[string]any{"key": "recentlyAdded", "title": "Recently Added"},
+		map[string]any{"key": "recentlyViewed", "title": "Recently Viewed"},
+		map[string]any{"key": "onDeck", "title": "Continue Watching"},
+		map[string]any{"key": "collection", "secondary": true, "title": "By Collection"},
+		map[string]any{"key": "genre", "secondary": true, "title": "By Genre"},
+		map[string]any{"key": "year", "secondary": true, "title": "By Year"},
+		map[string]any{"key": "director", "secondary": true, "title": "By Director"},
+		map[string]any{"key": "actor", "secondary": true, "title": "By Starring Actor"},
+		map[string]any{"key": "search?type=1", "prompt": "Search " + sacrificialLibraryName, "search": true, "title": "Search..."},
+	}
+}
+
+func writeSacrificialLibrarySections(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":      1,
+			"allowSync": false,
+			"title1":    "Plex Library",
+			"Directory": []any{
+				map[string]any{
+					"agent":                        "tv.plex.agents.movie",
+					"allowSync":                    true,
+					"content":                      true,
+					"createdAt":                    libraryUpdatedAt,
+					"directory":                    true,
+					"filters":                      true,
+					"hidden":                       0,
+					"key":                          libraryID,
+					"language":                     "en-US",
+					"metadataAgentProviderGroupId": 1,
+					"refreshing":                   false,
+					"scannedAt":                    libraryScannedAt,
+					"scanner":                      "Plex Movie",
+					"title":                        sacrificialLibraryName,
+					"type":                         "movie",
+					"updatedAt":                    libraryUpdatedAt,
+					"uuid":                         libraryUUID,
+				},
+			},
+		},
+	})
+}
+
+func writeSacrificialLibrarySection(w http.ResponseWriter) {
+	directories := sacrificialLibraryDirectories()
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":             len(directories),
+			"allowSync":        false,
+			"art":              "/:/resources/movie-fanart.jpg",
+			"content":          "secondary",
+			"identifier":       "com.plexapp.plugins.library",
+			"librarySectionID": 1,
+			"mediaTagPrefix":   "/system/bundle/media/flags/",
+			"mediaTagVersion":  1,
+			"thumb":            "/:/resources/movie.png",
+			"title1":           sacrificialLibraryName,
+			"viewGroup":        "secondary",
+			"viewMode":         65592,
+			"Directory":        directories,
+		},
+	})
+}
+
+func writeSacrificialFirstCharacter(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":            1,
+			"allowSync":       false,
+			"art":             "/:/resources/movie-fanart.jpg",
+			"content":         "secondary",
+			"identifier":      "com.plexapp.plugins.library",
+			"mediaTagPrefix":  "/system/bundle/media/flags/",
+			"mediaTagVersion": 1,
+			"thumb":           "/:/resources/movie.png",
+			"title1":          sacrificialLibraryName,
+			"title2":          "By First Letter",
+			"viewGroup":       "secondary",
+			"viewMode":        65592,
+			"Directory": []any{
+				map[string]any{"size": 1, "key": "T", "title": "T"},
+			},
+		},
+	})
+}
+
+func writeSacrificialEmptyMovieNavigation(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                0,
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": sacrificialLibraryName,
+			"librarySectionUUID":  libraryUUID,
+			"mediaTagPrefix":      "/system/bundle/media/flags/",
+			"mediaTagVersion":     1,
+			"Metadata":            []any{},
+		},
+	})
+}
+
+func writeSacrificialEmptyDirectoryNavigation(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                0,
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": sacrificialLibraryName,
+			"librarySectionUUID":  libraryUUID,
+			"Directory":           []any{},
 		},
 	})
 }
