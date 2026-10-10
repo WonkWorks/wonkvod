@@ -17,6 +17,9 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
+    environment:
+      WONKVOD_PMS_MODE: "${WONKVOD_PMS_MODE:-synthetic}"
+      WONKVOD_PMS_UPSTREAM: "http://plex-identity:32400"
     volumes:
       - type: bind
         source: /opt/plex-identity/test2.mp4
@@ -32,6 +35,7 @@ services:
       start_period: 5s
     networks:
       - facade
+      - plex-identity
     logging:
       driver: local
       options:
@@ -91,3 +95,6 @@ networks:
   facade:
     internal: true
   edge:
+  plex-identity:
+    external: true
+    name: plex-identity_default

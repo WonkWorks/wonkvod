@@ -6,6 +6,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"image"
+	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -78,6 +79,9 @@ func TestRequestTraceCapturesTransactionAndExcludesSecrets(t *testing.T) {
 		t.Fatalf("instrumented response = status %d body %q", response.Code, response.Body.String())
 	}
 	trace := output.String()
+	if !strings.Contains(trace, `source="wonkvod"`) {
+		t.Fatalf("trace missing default source marker: %s", trace)
+	}
 	for _, expected := range []string{
 		"WONKVOD_TRACE",
 		`method="GET"`,
@@ -106,6 +110,113 @@ func TestRequestTraceCapturesTransactionAndExcludesSecrets(t *testing.T) {
 		if strings.Contains(trace, secret) {
 			t.Errorf("trace leaked secret %q: %s", secret, trace)
 		}
+	}
+}
+
+func TestPMSModeDefaultsToSyntheticHandler(t *testing.T) {
+	synthetic := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity" {
+			t.Fatalf("synthetic handler path = %q", r.URL.Path)
+		}
+		writeIdentity(w, r)
+	})
+	handler, err := handlerForPMSMode("", "", synthetic)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/identity", nil)
+	request.Header.Set("Accept", "application/json")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
+		t.Fatalf("default mode response = status %d body %q", response.Code, response.Body.String())
+	}
+}
+
+func TestPMSPassthroughPreservesRequestResponseAndTraceSource(t *testing.T) {
+	const directToken = "proxy-direct-secret"
+	const nestedToken = "proxy-nested-secret"
+	var received struct {
+		method, path, rawQuery, accept, byteRange, clientID, token, body string
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received.method = r.Method
+		received.path = r.URL.EscapedPath()
+		received.rawQuery = r.URL.RawQuery
+		received.accept = r.Header.Get("Accept")
+		received.byteRange = r.Header.Get("Range")
+		received.clientID = r.Header.Get("X-Plex-Client-Identifier")
+		received.token = r.Header.Get("X-Plex-Token")
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			t.Errorf("read upstream request body: %v", readErr)
+		}
+		received.body = string(body)
+
+		w.Header().Set("Content-Type", "video/mp4")
+		w.Header().Set("Content-Range", "bytes 10-19/100")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("first"))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		_, _ = w.Write([]byte("second"))
+	}))
+	defer upstream.Close()
+
+	handler, err := handlerForPMSMode("passthrough", upstream.URL, http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var traceOutput bytes.Buffer
+	handler = traceRequests(handler, log.New(&traceOutput, "", 0))
+	rawQuery := "url=%2Flibrary%2Fmetadata%2F1&context=playback%2526X-Plex-Token%253D" + nestedToken
+	request := httptest.NewRequest(http.MethodPost, "/library/parts/9/file.mp4?"+rawQuery, strings.NewReader("request-body"))
+	request.Header.Set("Accept", "video/mp4")
+	request.Header.Set("Range", "bytes=10-19")
+	request.Header.Set("X-Plex-Client-Identifier", "roku-client")
+	request.Header.Set("X-Plex-Token", directToken)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+
+	if received.method != http.MethodPost || received.path != "/library/parts/9/file.mp4" || received.rawQuery != rawQuery ||
+		received.accept != "video/mp4" || received.byteRange != "bytes=10-19" || received.clientID != "roku-client" ||
+		received.token != directToken || received.body != "request-body" {
+		t.Errorf("upstream request was mutated: %#v", received)
+	}
+	if response.Code != http.StatusPartialContent || response.Header().Get("Content-Type") != "video/mp4" ||
+		response.Header().Get("Content-Range") != "bytes 10-19/100" || response.Body.String() != "firstsecond" {
+		t.Errorf("proxied response = status %d headers %#v body %q", response.Code, response.Header(), response.Body.String())
+	}
+	trace := traceOutput.String()
+	if !strings.Contains(trace, `source="plex-identity"`) || !strings.Contains(trace, `status=206`) {
+		t.Errorf("passthrough trace missing source/status: %s", trace)
+	}
+	for _, secret := range []string{directToken, nestedToken} {
+		if strings.Contains(trace, secret) {
+			t.Errorf("passthrough trace leaked secret %q", secret)
+		}
+	}
+}
+
+func TestPMSPassthroughKeepsIdentityHealthcheckFunctional(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity" {
+			t.Fatalf("healthcheck path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"machineIdentifier":"` + machineID + `"}}`))
+	}))
+	defer upstream.Close()
+	handler, err := handlerForPMSMode("passthrough", upstream.URL, http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/identity", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
+		t.Fatalf("passthrough health response = status %d body %q", response.Code, response.Body.String())
 	}
 }
 

@@ -14,7 +14,9 @@ import (
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httputil"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -48,6 +50,8 @@ const (
 	movieDuration = 5000
 	movieSize     = 209970
 	movieBitrate  = 336
+
+	defaultPMSUpstream = "http://plex-identity:32400"
 )
 
 type plexBool bool
@@ -435,6 +439,11 @@ type traceResponseWriter struct {
 	http.ResponseWriter
 	statusCode int
 	bytes      int64
+	source     string
+}
+
+func (writer *traceResponseWriter) setTraceSource(source string) {
+	writer.source = source
 }
 
 func (writer *traceResponseWriter) WriteHeader(statusCode int) {
@@ -523,15 +532,16 @@ func traceHeader(r *http.Request, name string) string {
 func traceRequests(next http.Handler, logger *log.Logger) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		startedAt := time.Now()
-		writer := &traceResponseWriter{ResponseWriter: w}
+		writer := &traceResponseWriter{ResponseWriter: w, source: "wonkvod"}
 		defer func() {
 			statusCode := writer.statusCode
 			if statusCode == 0 {
 				statusCode = http.StatusOK
 			}
 			logger.Printf(
-				"WONKVOD_TRACE timestamp=%q method=%q path=%q query=%q remote_addr=%q client_ip=%q x_plex_client_identifier=%q x_plex_product=%q x_plex_version=%q x_plex_device=%q x_plex_device_name=%q x_plex_platform=%q x_plex_platform_version=%q accept=%q status=%d content_type=%q bytes=%d duration_ms=%.3f",
+				"WONKVOD_TRACE timestamp=%q source=%q method=%q path=%q query=%q remote_addr=%q client_ip=%q x_plex_client_identifier=%q x_plex_product=%q x_plex_version=%q x_plex_device=%q x_plex_device_name=%q x_plex_platform=%q x_plex_platform_version=%q accept=%q status=%d content_type=%q bytes=%d duration_ms=%.3f",
 				startedAt.Format("2006-01-02T15:04:05.000Z07:00"),
+				writer.source,
 				r.Method,
 				r.URL.EscapedPath(),
 				sanitizedRawQuery(r.URL.RawQuery),
@@ -554,6 +564,52 @@ func traceRequests(next http.Handler, logger *log.Logger) http.Handler {
 
 		next.ServeHTTP(writer, r)
 	})
+}
+
+func markTraceSource(w http.ResponseWriter, source string) {
+	if writer, ok := w.(interface{ setTraceSource(string) }); ok {
+		writer.setTraceSource(source)
+	}
+}
+
+func pmsPassthroughHandler(upstream string) (http.Handler, error) {
+	target, err := url.Parse(upstream)
+	if err != nil || target.Scheme == "" || target.Host == "" {
+		return nil, fmt.Errorf("invalid PMS upstream %q", upstream)
+	}
+	if target.Scheme != "http" && target.Scheme != "https" {
+		return nil, fmt.Errorf("unsupported PMS upstream scheme %q", target.Scheme)
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	director := proxy.Director
+	proxy.Director = func(request *http.Request) {
+		director(request)
+		request.Host = target.Host
+	}
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, proxyErr error) {
+		log.Printf("PMS passthrough error path=%q: %v", r.URL.EscapedPath(), proxyErr)
+		http.Error(w, "PMS upstream unavailable", http.StatusBadGateway)
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		markTraceSource(w, "plex-identity")
+		proxy.ServeHTTP(w, r)
+	}), nil
+}
+
+func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "", "synthetic", "wonkvod":
+		return synthetic, nil
+	case "passthrough":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughHandler(upstream)
+	default:
+		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
+	}
 }
 
 // Request tracing is centralized around the server handler. Keep the existing
@@ -1814,6 +1870,14 @@ func main() {
 		writeRoot(w)
 	})
 
-	log.Printf("WonkVOD test server listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, traceRequests(http.DefaultServeMux, log.Default())))
+	mode := os.Getenv("WONKVOD_PMS_MODE")
+	handler, err := handlerForPMSMode(mode, os.Getenv("WONKVOD_PMS_UPSTREAM"), http.DefaultServeMux)
+	if err != nil {
+		log.Fatal(err)
+	}
+	if strings.TrimSpace(mode) == "" {
+		mode = "synthetic"
+	}
+	log.Printf("WonkVOD test server listening on %s mode=%s", addr, mode)
+	log.Fatal(http.ListenAndServe(addr, traceRequests(handler, log.Default())))
 }
