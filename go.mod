@@ -1,4 +1,4 @@
-module wonkplex
+module wonkvod
 
 go 1.25.1
 

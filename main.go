@@ -26,7 +26,7 @@ const (
 	libraryName = "WonkVOD Movies"
 
 	movieRatingKey = "1001"
-	movieTitle     = "WonkPlex Test Movie"
+	movieTitle     = "WonkVOD Test Movie"
 
 	testFile = "/opt/plex-identity/test2.mp4"
 
@@ -517,7 +517,7 @@ func syntheticMovie() movie {
 		Title:                 movieTitle,
 		TitleSort:             movieTitle,
 		OriginalTitle:         movieTitle,
-		Summary:               "A synthetic movie served entirely by WonkPlex.",
+		Summary:               "A synthetic movie served entirely by WonkVOD.",
 		Year:                  2026,
 		Duration:              movieDuration,
 		AddedAt:               1790899200,
@@ -539,7 +539,7 @@ func writeRoot(w http.ResponseWriter) {
 		"MediaContainer": map[string]any{
 			"size":              0,
 			"apiVersion":        apiVersion,
-			"friendlyName":      "WonkPlex Identity Test",
+			"friendlyName":      "WonkVOD",
 			"machineIdentifier": machineID,
 			"version":           version,
 			"platform":          "Linux",
@@ -554,7 +554,7 @@ func writeMediaProviders(w http.ResponseWriter) {
 		"MediaContainer": map[string]any{
 			"size":              1,
 			"apiVersion":        apiVersion,
-			"friendlyName":      "WonkPlex Identity Test",
+			"friendlyName":      "WonkVOD",
 			"machineIdentifier": machineID,
 			"version":           version,
 			"platform":          "Linux",
@@ -604,7 +604,7 @@ func writeLibrarySections(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
 			"size":              1,
-			"friendlyName":      "WonkPlex Identity Test",
+			"friendlyName":      "WonkVOD",
 			"machineIdentifier": machineID,
 			"Directory": []any{
 				libraryDirectory(),
@@ -962,6 +962,6 @@ func main() {
 		writeRoot(w)
 	})
 
-	log.Printf("WonkPlex test server listening on %s", addr)
+	log.Printf("WonkVOD test server listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, nil))
 }
