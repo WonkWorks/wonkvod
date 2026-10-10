@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"image"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -38,6 +40,70 @@ func TestSanitizedURLRedactsPlexTokenEmbeddedInQueryValue(t *testing.T) {
 		}
 		if !strings.Contains(got, "%5BREDACTED%5D") {
 			t.Fatalf("sanitized URL did not contain redaction marker")
+		}
+	}
+}
+
+func TestRequestTraceCapturesTransactionAndExcludesSecrets(t *testing.T) {
+	var output bytes.Buffer
+	logger := log.New(&output, "", 0)
+	handler := traceRequests(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.wonkvod-test")
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("test response"))
+	}), logger)
+
+	const directToken = "direct-sensitive-value"
+	const nestedToken = "nested-sensitive-value"
+	req := httptest.NewRequest(http.MethodGet, "/library/metadata/1001?checkFiles=1&X-Plex-Token="+directToken+"&context=playback%2526X-Plex-Token%253D"+nestedToken+"%2526tail%253D1", nil)
+	req.RemoteAddr = "192.0.2.20:43210"
+	req.Header.Set("X-Forwarded-For", "192.0.2.30")
+	req.Header.Set("X-Plex-Client-Identifier", "roku-client")
+	req.Header.Set("X-Plex-Product", "Plex for Roku")
+	req.Header.Set("X-Plex-Version", "7.0.0")
+	req.Header.Set("X-Plex-Device", "Roku")
+	req.Header.Set("X-Plex-Device-Name", "Bedroom Roku")
+	req.Header.Set("X-Plex-Platform", "Roku")
+	req.Header.Set("X-Plex-Platform-Version", "14.5")
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Plex-Token", "header-sensitive-value")
+	req.Header.Set("Authorization", "Bearer authorization-sensitive-value")
+	req.Header.Set("Cookie", "session=cookie-sensitive-value")
+
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+
+	if response.Code != http.StatusPartialContent || response.Body.String() != "test response" {
+		t.Fatalf("instrumented response = status %d body %q", response.Code, response.Body.String())
+	}
+	trace := output.String()
+	for _, expected := range []string{
+		"WONKVOD_TRACE",
+		`method="GET"`,
+		`path="/library/metadata/1001"`,
+		`remote_addr="192.0.2.20:43210"`,
+		`client_ip="192.0.2.30"`,
+		`x_plex_client_identifier="roku-client"`,
+		`x_plex_product="Plex for Roku"`,
+		`x_plex_device_name="Bedroom Roku"`,
+		`accept="application/json"`,
+		`status=206`,
+		`content_type="application/vnd.wonkvod-test"`,
+		`bytes=13`,
+	} {
+		if !strings.Contains(trace, expected) {
+			t.Errorf("trace missing %q: %s", expected, trace)
+		}
+	}
+	if !regexp.MustCompile(`timestamp="[^"]+\.\d{3}(?:Z|[+-]\d{2}:\d{2})"`).MatchString(trace) {
+		t.Errorf("trace lacks millisecond timestamp: %s", trace)
+	}
+	if !strings.Contains(trace, "[REDACTED]") {
+		t.Errorf("trace lacks redaction marker: %s", trace)
+	}
+	for _, secret := range []string{directToken, nestedToken, "header-sensitive-value", "authorization-sensitive-value", "cookie-sensitive-value"} {
+		if strings.Contains(trace, secret) {
+			t.Errorf("trace leaked secret %q: %s", secret, trace)
 		}
 	}
 }

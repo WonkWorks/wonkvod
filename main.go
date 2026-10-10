@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
@@ -8,8 +9,10 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"io"
 	"log"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -356,11 +359,13 @@ func redactEmbeddedPlexTokens(value string) string {
 		switch {
 		case strings.HasPrefix(lowerValue[nameEnd:], "="):
 			tokenStart++
-		case strings.HasPrefix(lowerValue[nameEnd:], "%3d"):
-			tokenStart += len("%3d")
 		default:
-			searchFrom = nameEnd
-			continue
+			encodedEqualsLength := encodedQueryCharacterPrefixLength(lowerValue[nameEnd:], "3d")
+			if encodedEqualsLength == 0 {
+				searchFrom = nameEnd
+				continue
+			}
+			tokenStart += encodedEqualsLength
 		}
 
 		tokenEnd := tokenStart
@@ -369,7 +374,10 @@ func redactEmbeddedPlexTokens(value string) string {
 				break
 			}
 			remaining := lowerValue[tokenEnd:]
-			if strings.HasPrefix(remaining, "%26") || strings.HasPrefix(remaining, "%3f") || strings.HasPrefix(remaining, "%23") {
+			if encodedQueryCharacterPrefixLength(remaining, "26") != 0 ||
+				encodedQueryCharacterPrefixLength(remaining, "3f") != 0 ||
+				encodedQueryCharacterPrefixLength(remaining, "23") != 0 ||
+				encodedQueryCharacterPrefixLength(remaining, "3b") != 0 {
 				break
 			}
 			tokenEnd++
@@ -382,24 +390,171 @@ func redactEmbeddedPlexTokens(value string) string {
 	return value
 }
 
-func logRequest(r *http.Request) {
-	log.Printf("%s %s from %s", r.Method, sanitizedURL(r.URL), r.RemoteAddr)
-
-	if r.URL.Path == "/identity" ||
-		r.URL.Path == "/library/metadata/1001" {
-
-		log.Printf("REQUEST HEADERS for %s:", r.URL.Path)
-
-		for k, values := range r.Header {
-			for _, v := range values {
-				if strings.EqualFold(k, "X-Plex-Token") {
-					log.Printf("  %s: [REDACTED]", k)
-				} else {
-					log.Printf("  %s: %s", k, v)
-				}
-			}
+func encodedQueryCharacterPrefixLength(value, hexadecimalCharacter string) int {
+	for encodingDepth := 1; encodingDepth <= 8; encodingDepth++ {
+		prefix := "%" + strings.Repeat("25", encodingDepth-1) + hexadecimalCharacter
+		if strings.HasPrefix(value, prefix) {
+			return len(prefix)
 		}
 	}
+	return 0
+}
+
+func sanitizedRawQuery(rawQuery string) string {
+	components := strings.Split(rawQuery, "&")
+	for index, component := range components {
+		key, _, hasValue := strings.Cut(component, "=")
+		decodedKey, err := url.QueryUnescape(key)
+		if err == nil && hasValue && sensitiveQueryKey(decodedKey) {
+			components[index] = key + "=[REDACTED]"
+			continue
+		}
+		components[index] = redactEmbeddedPlexTokens(component)
+	}
+	return strings.Join(components, "&")
+}
+
+func sensitiveQueryKey(key string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(key))
+	return strings.Contains(normalized, "token") ||
+		normalized == "authorization" ||
+		normalized == "auth" ||
+		normalized == "cookie" ||
+		normalized == "password" ||
+		normalized == "secret" ||
+		normalized == "api_key" ||
+		normalized == "apikey" ||
+		normalized == "claim"
+}
+
+type traceResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+	bytes      int64
+}
+
+func (writer *traceResponseWriter) WriteHeader(statusCode int) {
+	if writer.statusCode != 0 {
+		return
+	}
+	writer.statusCode = statusCode
+	writer.ResponseWriter.WriteHeader(statusCode)
+}
+
+func (writer *traceResponseWriter) Write(body []byte) (int, error) {
+	if writer.statusCode == 0 {
+		writer.statusCode = http.StatusOK
+	}
+	written, err := writer.ResponseWriter.Write(body)
+	writer.bytes += int64(written)
+	return written, err
+}
+
+func (writer *traceResponseWriter) Flush() {
+	if writer.statusCode == 0 {
+		writer.WriteHeader(http.StatusOK)
+	}
+	if flusher, ok := writer.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
+}
+
+func (writer *traceResponseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	hijacker, ok := writer.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, fmt.Errorf("response writer does not support hijacking")
+	}
+	if writer.statusCode == 0 {
+		writer.statusCode = http.StatusSwitchingProtocols
+	}
+	return hijacker.Hijack()
+}
+
+func (writer *traceResponseWriter) Push(target string, options *http.PushOptions) error {
+	if pusher, ok := writer.ResponseWriter.(http.Pusher); ok {
+		return pusher.Push(target, options)
+	}
+	return http.ErrNotSupported
+}
+
+func (writer *traceResponseWriter) ReadFrom(reader io.Reader) (int64, error) {
+	if writer.statusCode == 0 {
+		writer.statusCode = http.StatusOK
+	}
+	var (
+		written int64
+		err     error
+	)
+	if readerFrom, ok := writer.ResponseWriter.(io.ReaderFrom); ok {
+		written, err = readerFrom.ReadFrom(reader)
+	} else {
+		written, err = io.Copy(writer.ResponseWriter, reader)
+	}
+	writer.bytes += written
+	return written, err
+}
+
+func (writer *traceResponseWriter) Unwrap() http.ResponseWriter {
+	return writer.ResponseWriter
+}
+
+func requestClientIP(r *http.Request) string {
+	for _, forwarded := range strings.Split(r.Header.Get("X-Forwarded-For"), ",") {
+		candidate := strings.TrimSpace(forwarded)
+		if net.ParseIP(candidate) != nil {
+			return candidate
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err == nil {
+		return host
+	}
+	return r.RemoteAddr
+}
+
+func traceHeader(r *http.Request, name string) string {
+	return redactEmbeddedPlexTokens(r.Header.Get(name))
+}
+
+func traceRequests(next http.Handler, logger *log.Logger) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		startedAt := time.Now()
+		writer := &traceResponseWriter{ResponseWriter: w}
+		defer func() {
+			statusCode := writer.statusCode
+			if statusCode == 0 {
+				statusCode = http.StatusOK
+			}
+			logger.Printf(
+				"WONKVOD_TRACE timestamp=%q method=%q path=%q query=%q remote_addr=%q client_ip=%q x_plex_client_identifier=%q x_plex_product=%q x_plex_version=%q x_plex_device=%q x_plex_device_name=%q x_plex_platform=%q x_plex_platform_version=%q accept=%q status=%d content_type=%q bytes=%d duration_ms=%.3f",
+				startedAt.Format("2006-01-02T15:04:05.000Z07:00"),
+				r.Method,
+				r.URL.EscapedPath(),
+				sanitizedRawQuery(r.URL.RawQuery),
+				r.RemoteAddr,
+				requestClientIP(r),
+				traceHeader(r, "X-Plex-Client-Identifier"),
+				traceHeader(r, "X-Plex-Product"),
+				traceHeader(r, "X-Plex-Version"),
+				traceHeader(r, "X-Plex-Device"),
+				traceHeader(r, "X-Plex-Device-Name"),
+				traceHeader(r, "X-Plex-Platform"),
+				traceHeader(r, "X-Plex-Platform-Version"),
+				traceHeader(r, "Accept"),
+				statusCode,
+				writer.Header().Get("Content-Type"),
+				writer.bytes,
+				float64(time.Since(startedAt).Microseconds())/1000,
+			)
+		}()
+
+		next.ServeHTTP(writer, r)
+	})
+}
+
+// Request tracing is centralized around the server handler. Keep the existing
+// route hooks inert so route behavior remains unchanged in this experiment.
+func logRequest(_ *http.Request) {
 }
 
 func handleOptions(w http.ResponseWriter, r *http.Request) bool {
@@ -1483,5 +1638,5 @@ func main() {
 	})
 
 	log.Printf("WonkVOD test server listening on %s", addr)
-	log.Fatal(http.ListenAndServe(addr, nil))
+	log.Fatal(http.ListenAndServe(addr, traceRequests(http.DefaultServeMux, log.Default())))
 }
