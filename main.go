@@ -804,6 +804,10 @@ func writeMediaProviders(w http.ResponseWriter) {
 							"type": "metadata",
 						},
 						map[string]any{
+							"key":  "/hubs/promoted",
+							"type": "promoted",
+						},
+						map[string]any{
 							"flavor": "universal",
 							"key":    "/playQueues",
 							"type":   "playqueue",
@@ -889,23 +893,135 @@ func writeMovieMetadata(w http.ResponseWriter, r *http.Request) {
 	))
 }
 
-func writeMovieHub(w http.ResponseWriter) {
+func homeContinueHub() map[string]any {
+	return map[string]any{
+		"context":       "hub.home.continue",
+		"hubIdentifier": "home.continue",
+		"key":           "/hubs/home/continueWatching",
+		"more":          false,
+		"promoted":      true,
+		"size":          0,
+		"style":         "hero",
+		"title":         "Continue Watching",
+		"type":          "mixed",
+	}
+}
+
+func homeOnDeckHub() map[string]any {
+	return map[string]any{
+		"context":       "hub.home.ondeck",
+		"hubIdentifier": "home.ondeck",
+		"key":           "/hubs/home/onDeck",
+		"more":          false,
+		"promoted":      true,
+		"size":          0,
+		"style":         "shelf",
+		"title":         "On Deck",
+		"type":          "episode",
+	}
+}
+
+func recentlyAddedMovieHub(home bool) map[string]any {
+	hubIdentifier := "movie.recentlyadded.1"
+	key := "/library/sections/1/all?sort=addedAt:desc"
+	context := "hub.movie.recentlyadded"
+	title := "Recently Added in " + libraryName
+	if home {
+		hubIdentifier = "home.movies.recent"
+		key = "/hubs/home/recentlyAdded?type=1"
+		context = "hub.home.movies.recent"
+		title = "Recently Added Movies"
+	}
+
+	return map[string]any{
+		"context":       context,
+		"hubIdentifier": hubIdentifier,
+		"hubKey":        "/library/metadata/" + movieRatingKey,
+		"key":           key,
+		"more":          false,
+		"promoted":      true,
+		"size":          1,
+		"style":         "shelf",
+		"title":         title,
+		"type":          "movie",
+		"Metadata": []any{
+			syntheticMovieList(),
+		},
+	}
+}
+
+func sectionContinueWatchingHub() map[string]any {
+	return map[string]any{
+		"context":       "hub.movie.inprogress",
+		"hubIdentifier": "movie.inprogress.1",
+		"key":           "/hubs/sections/1/continueWatching/items",
+		"more":          false,
+		"size":          0,
+		"style":         "shelf",
+		"title":         "Continue Watching",
+		"type":          "movie",
+	}
+}
+
+func writeHomeHubs(w http.ResponseWriter, r *http.Request) {
+	requestedIdentifiers := map[string]bool{}
+	for _, identifier := range strings.Split(r.URL.Query().Get("identifier"), ",") {
+		if identifier != "" {
+			requestedIdentifiers[identifier] = true
+		}
+	}
+	includeAll := len(requestedIdentifiers) == 0
+	hubs := []any{}
+	if includeAll || requestedIdentifiers["home.continue"] {
+		hubs = append(hubs, homeContinueHub())
+	}
+	if includeAll || requestedIdentifiers["home.ondeck"] {
+		hubs = append(hubs, homeOnDeckHub())
+	}
+	if includeAll || requestedIdentifiers["home.movies.recent"] {
+		hubs = append(hubs, recentlyAddedMovieHub(true))
+	}
+
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
-			"size": 1,
-			"Hub": []any{
-				map[string]any{
-					"hubIdentifier": "home.movies",
-					"key":           "/library/sections/1/all?type=1",
-					"title":         libraryName,
-					"type":          "movie",
-					"size":          1,
-					"more":          false,
-					"Metadata": []any{
-						syntheticMovieList(),
-					},
-				},
-			},
+			"size":       len(hubs),
+			"allowSync":  true,
+			"identifier": "com.plexapp.plugins.library",
+			"Hub":        hubs,
+		},
+	})
+}
+
+func writePromotedHubs(w http.ResponseWriter) {
+	hubs := []any{
+		homeContinueHub(),
+		homeOnDeckHub(),
+		recentlyAddedMovieHub(false),
+	}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":       len(hubs),
+			"allowSync":  true,
+			"identifier": "com.plexapp.plugins.library",
+			"Hub":        hubs,
+		},
+	})
+}
+
+func writeMovieHub(w http.ResponseWriter) {
+	hubs := []any{
+		sectionContinueWatchingHub(),
+		recentlyAddedMovieHub(false),
+	}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                len(hubs),
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": libraryName,
+			"librarySectionUUID":  libraryUUID,
+			"Hub":                 hubs,
 		},
 	})
 }
@@ -1083,7 +1199,15 @@ func main() {
 		if handleOptions(w, r) {
 			return
 		}
-		writeEmptyContainer(w)
+		writeHomeHubs(w, r)
+	})
+
+	http.HandleFunc("/hubs/promoted", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writePromotedHubs(w)
 	})
 
 	http.HandleFunc("/hubs/sections/1", func(w http.ResponseWriter, r *http.Request) {

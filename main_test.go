@@ -399,6 +399,131 @@ func TestStrictRealPMSJSONShapes(t *testing.T) {
 	})
 }
 
+func responseContainerObject(t *testing.T, response *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	document := decodeStrictJSON(t, response.Body.Bytes())
+	assertObjectShape(t, document, "$", map[string]string{"MediaContainer": "object"})
+	return requireObject(t, document["MediaContainer"], "MediaContainer")
+}
+
+func hubObjects(t *testing.T, container map[string]any, count int) []map[string]any {
+	t.Helper()
+	values := requireArray(t, container["Hub"], "MediaContainer.Hub", count)
+	hubs := make([]map[string]any, len(values))
+	for index, value := range values {
+		hubs[index] = requireObject(t, value, "MediaContainer.Hub")
+	}
+	return hubs
+}
+
+func TestMediaProvidersAdvertisesOnlySupportedPromotedCapability(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeMediaProviders(response)
+	container := responseContainerObject(t, response)
+	providers := requireArray(t, container["MediaProvider"], "MediaContainer.MediaProvider", 1)
+	provider := requireObject(t, providers[0], "MediaContainer.MediaProvider[0]")
+	features := requireArray(t, provider["Feature"], "MediaContainer.MediaProvider[0].Feature", 5)
+
+	promotedCount := 0
+	featureTypes := map[string]bool{}
+	for _, value := range features {
+		feature := requireObject(t, value, "Feature")
+		featureType, _ := feature["type"].(string)
+		featureTypes[featureType] = true
+		if featureType == "promoted" {
+			promotedCount++
+			assertObjectShape(t, feature, "promoted Feature", map[string]string{"key": "string", "type": "string"})
+			if feature["key"] != "/hubs/promoted" {
+				t.Errorf("promoted feature key = %#v", feature["key"])
+			}
+		}
+	}
+	if promotedCount != 1 {
+		t.Fatalf("promoted feature count = %d", promotedCount)
+	}
+	for _, unsupported := range []string{"search", "match", "rate", "imagetranscoder", "continuewatching", "playlist", "collection", "universalsearch"} {
+		if featureTypes[unsupported] {
+			t.Errorf("unsupported feature %q was advertised", unsupported)
+		}
+	}
+}
+
+func TestPromotedHubsHavePMSHomeShape(t *testing.T) {
+	response := httptest.NewRecorder()
+	writePromotedHubs(response)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{
+		"size": "integer", "allowSync": "boolean", "identifier": "string", "Hub": "array",
+	})
+	hubs := hubObjects(t, container, 3)
+
+	assertObjectShape(t, hubs[0], "home.continue", map[string]string{
+		"context": "string", "hubIdentifier": "string", "key": "string", "more": "boolean", "promoted": "boolean",
+		"size": "integer", "style": "string", "title": "string", "type": "string",
+	})
+	assertObjectShape(t, hubs[1], "home.ondeck", map[string]string{
+		"context": "string", "hubIdentifier": "string", "key": "string", "more": "boolean", "promoted": "boolean",
+		"size": "integer", "style": "string", "title": "string", "type": "string",
+	})
+	assertObjectShape(t, hubs[2], "movie.recentlyadded.1", map[string]string{
+		"context": "string", "hubIdentifier": "string", "hubKey": "string", "key": "string", "more": "boolean",
+		"promoted": "boolean", "size": "integer", "style": "string", "title": "string", "type": "string", "Metadata": "array",
+	})
+	if hubs[0]["hubIdentifier"] != "home.continue" || hubs[1]["hubIdentifier"] != "home.ondeck" || hubs[2]["hubIdentifier"] != "movie.recentlyadded.1" {
+		t.Errorf("promoted hub identifiers = %#v, %#v, %#v", hubs[0]["hubIdentifier"], hubs[1]["hubIdentifier"], hubs[2]["hubIdentifier"])
+	}
+	if metadata := requireArray(t, hubs[2]["Metadata"], "recently added Metadata", 1); requireObject(t, metadata[0], "recently added movie")["ratingKey"] != movieRatingKey {
+		t.Errorf("recently added movie does not reference fixture ratingKey")
+	}
+}
+
+func TestRokuHomeHubIdentifiersReturnDeclaredEmptyHubs(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/hubs?identifier=home.continue%2Chome.ondeck&includeDetails=1", nil)
+	response := httptest.NewRecorder()
+	writeHomeHubs(response, request)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{
+		"size": "integer", "allowSync": "boolean", "identifier": "string", "Hub": "array",
+	})
+	hubs := hubObjects(t, container, 2)
+	for index, identifier := range []string{"home.continue", "home.ondeck"} {
+		if hubs[index]["hubIdentifier"] != identifier || hubs[index]["size"] != json.Number("0") || hubs[index]["more"] != false || hubs[index]["promoted"] != true {
+			t.Errorf("%s declaration = %#v", identifier, hubs[index])
+		}
+		if _, present := hubs[index]["Metadata"]; present {
+			t.Errorf("empty hub %s unexpectedly has Metadata", identifier)
+		}
+	}
+}
+
+func TestMovieSectionHubsUsePMSContextAndPromotionSemantics(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeMovieHub(response)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{
+		"size": "integer", "allowSync": "boolean", "identifier": "string", "librarySectionID": "integer",
+		"librarySectionTitle": "string", "librarySectionUUID": "string", "Hub": "array",
+	})
+	hubs := hubObjects(t, container, 2)
+	assertObjectShape(t, hubs[0], "movie.inprogress.1", map[string]string{
+		"context": "string", "hubIdentifier": "string", "key": "string", "more": "boolean", "size": "integer",
+		"style": "string", "title": "string", "type": "string",
+	})
+	assertObjectShape(t, hubs[1], "movie.recentlyadded.1", map[string]string{
+		"context": "string", "hubIdentifier": "string", "hubKey": "string", "key": "string", "more": "boolean",
+		"promoted": "boolean", "size": "integer", "style": "string", "title": "string", "type": "string", "Metadata": "array",
+	})
+	if hubs[0]["hubIdentifier"] != "movie.inprogress.1" || hubs[0]["context"] != "hub.movie.inprogress" {
+		t.Errorf("continue-watching hub semantics = %#v", hubs[0])
+	}
+	if _, promoted := hubs[0]["promoted"]; promoted {
+		t.Error("empty section continue-watching hub should not be promoted")
+	}
+	if hubs[1]["hubIdentifier"] != "movie.recentlyadded.1" || hubs[1]["context"] != "hub.movie.recentlyadded" || hubs[1]["promoted"] != true {
+		t.Errorf("recently-added hub semantics = %#v", hubs[1])
+	}
+}
+
 func xmlAttributeNames(attributes []xml.Attr) map[string]bool {
 	names := make(map[string]bool, len(attributes))
 	for _, attribute := range attributes {
