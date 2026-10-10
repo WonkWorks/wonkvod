@@ -14,7 +14,8 @@ FROM alpine:3.22
 ARG VCS_REF=unknown
 LABEL org.opencontainers.image.title="WonkVOD" \
       org.opencontainers.image.revision="${VCS_REF}"
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates ffmpeg \
+    && rm /usr/bin/ffmpeg
 COPY --from=build /out/wonkvod /usr/local/bin/wonkvod
 USER 65532:65532
 EXPOSE 32499

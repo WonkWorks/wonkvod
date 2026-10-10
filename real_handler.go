@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	canonical "wonkvod/internal/catalog"
 	"wonkvod/internal/xtream"
 )
 
@@ -320,7 +321,9 @@ func (h *realCatalogHandler) serveMetadata(w http.ResponseWriter, r *http.Reques
 				}
 				return false
 			}
-			size, available := h.detailCapability(r, catalogPlayable{Kind: "movie", RatingKey: key, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, Movie: &item})
+			playable := catalogPlayable{Kind: "movie", RatingKey: key, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: &item}
+			size, available := h.detailCapability(r, playable)
+			item.MediaFacts = h.lazyMediaFacts(r.Context(), playable, int64(size))
 			container := mediaContainer{Size: 1, AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Metadata: []movie{h.movieModel(item, true, available, size)}}
 			writeNegotiatedMediaContainer(w, r, container)
 			return true
@@ -386,8 +389,9 @@ func (h *realCatalogHandler) serveMetadata(w http.ResponseWriter, r *http.Reques
 						}
 						return false
 					}
-					playable := catalogPlayable{Kind: "episode", RatingKey: key, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, Show: &show, Season: &season, Episode: &episode}
+					playable := catalogPlayable{Kind: "episode", RatingKey: key, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: &show, Season: &season, Episode: &episode}
 					size, available := h.detailCapability(r, playable)
+					episode.MediaFacts = h.lazyMediaFacts(r.Context(), playable, int64(size))
 					container := h.realTVContainer([]tvItem{h.episodeModel(show, season, episode, true, r.URL.Query().Get("includeExtras") == "1", available, size)})
 					writeNegotiatedTVContainer(w, r, container)
 					return true
@@ -412,6 +416,22 @@ func (h *realCatalogHandler) detailCapability(r *http.Request, item catalogPlaya
 		return 0, true
 	}
 	return int(capability.Size), true
+}
+
+func (h *realCatalogHandler) lazyMediaFacts(parent context.Context, item catalogPlayable, size int64) canonical.MediaFacts {
+	if item.MediaFacts.State == "inspected" {
+		return item.MediaFacts
+	}
+	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+	defer cancel()
+	facts, err := h.catalog.inspectMedia(ctx, item, size)
+	if err != nil {
+		log.Printf("lazy media inspection failed kind=%q source_id=%q state=%q", item.Kind, item.SourceID, facts.State)
+		if item.MediaFacts.State == "inspected" {
+			return item.MediaFacts
+		}
+	}
+	return facts
 }
 
 func (h *realCatalogHandler) writeSeasons(w http.ResponseWriter, r *http.Request, show canonicalShow) {
@@ -455,10 +475,13 @@ func (h *realCatalogHandler) movieModel(item canonicalMovie, detail, available b
 	if duration <= 0 {
 		duration = item.Details.Runtime * 60 * 1000
 	}
+	if item.MediaFacts.State == "inspected" && item.MediaFacts.DurationMS > 0 {
+		duration = int(item.MediaFacts.DurationMS)
+	}
 	year := parsePositiveInt(item.Year)
 	rating, _ := strconv.ParseFloat(item.Details.Rating, 64)
 	timestamp := itemTimestamp(item.Revision)
-	result := movie{RatingKey: key, Key: "/library/metadata/" + key, GUID: "local://" + key, Type: "movie", Title: item.Title, TitleSort: item.Title, Slug: slugify(item.Title, item.Year), Thumb: h.thumbPath(key), Art: h.artPath(key), Summary: item.Details.Plot, Year: year, Duration: duration, AddedAt: timestamp, UpdatedAt: timestamp, LibrarySectionID: 1, LibrarySectionKey: "/library/sections/1", LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, OriginallyAvailableAt: item.Details.Premiere, Rating: rating, Media: []media{h.mediaModel("movie", item.SourceID, item.Extension, duration, item.Details.Bitrate, size, detail, available)}}
+	result := movie{RatingKey: key, Key: "/library/metadata/" + key, GUID: "local://" + key, Type: "movie", Title: item.Title, TitleSort: item.Title, Slug: slugify(item.Title, item.Year), Thumb: h.thumbPath(key), Art: h.artPath(key), Summary: item.Details.Plot, Year: year, Duration: duration, AddedAt: timestamp, UpdatedAt: timestamp, LibrarySectionID: 1, LibrarySectionKey: "/library/sections/1", LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, OriginallyAvailableAt: item.Details.Premiere, Rating: rating, Media: []media{h.mediaModel("movie", item.SourceID, item.Extension, duration, item.Details.Bitrate, size, detail, available, item.MediaFacts)}}
 	if item.Details.TMDBID != "" {
 		result.Guids = []plexGuid{{ID: "tmdb://" + item.Details.TMDBID}}
 	}
@@ -543,6 +566,9 @@ func (h *realCatalogHandler) episodeModel(show canonicalShow, season canonicalSe
 	if duration <= 0 {
 		duration = episode.Details.Runtime * 60 * 1000
 	}
+	if episode.MediaFacts.State == "inspected" && episode.MediaFacts.DurationMS > 0 {
+		duration = int(episode.MediaFacts.DurationMS)
+	}
 	item := tvBaseItem()
 	item.RatingKey = key
 	item.Key = "/library/metadata/" + key
@@ -564,7 +590,7 @@ func (h *realCatalogHandler) episodeModel(show canonicalShow, season canonicalSe
 	item.Thumb = h.thumbPath(key)
 	item.Art = h.artPath(showKey)
 	item.Images = []plexImage{{Alt: item.Title, Type: "snapshot", URL: item.Thumb}}
-	item.Media = []media{h.mediaModel("episode", episode.SourceID, episode.Extension, duration, episode.Details.Bitrate, size, detail, available)}
+	item.Media = []media{h.mediaModel("episode", episode.SourceID, episode.Extension, duration, episode.Details.Bitrate, size, detail, available, episode.MediaFacts)}
 	item.LibrarySectionUUID = tvLibraryUUID
 	item.AddedAt = itemTimestamp(show.Revision)
 	item.UpdatedAt = item.AddedAt
@@ -581,21 +607,108 @@ func (h *realCatalogHandler) episodeModel(show canonicalShow, season canonicalSe
 	return item
 }
 
-func (h *realCatalogHandler) mediaModel(kind, sourceID, extension string, duration, bitrate, size int, detail, available bool) media {
+func (h *realCatalogHandler) mediaModel(kind, sourceID, extension string, duration, bitrate, size int, detail, available bool, facts canonical.MediaFacts) media {
 	if extension == "" {
 		extension = "mkv"
 	}
 	partID := partObjectID(kind, sourceID)
 	partKey := fmt.Sprintf("/library/parts/%d/file.%s", partID, extension)
 	p := part{ID: int(partID), Key: partKey, Duration: duration, File: "/virtual/" + kind + "-" + sourceID + "." + extension, Size: size, Container: extension, Has64BitOffsets: false, OptimizedForStreaming: false, VideoProfile: "high"}
-	if detail {
+	if facts.State == "inspected" {
+		if facts.Container != "" {
+			extension = facts.Container
+			p.Container = facts.Container
+		}
+		if facts.DurationMS > 0 {
+			duration = int(facts.DurationMS)
+			p.Duration = duration
+		}
+		if facts.BitrateKbps > 0 {
+			bitrate = facts.BitrateKbps
+		}
+		if facts.Size > 0 {
+			size = int(facts.Size)
+			p.Size = size
+		}
+	}
+	if detail && facts.State != "inspected" {
 		p.Stream = []stream{{ID: int(videoStreamObjectID(kind, sourceID)), StreamType: 1, Default: true, Codec: "h264", Index: 0, Profile: "high", StreamIdentifier: "1", DisplayTitle: "Video", ExtendedDisplayTitle: "Video (H.264)"}, {ID: int(audioStreamObjectID(kind, sourceID)), StreamType: 2, Selected: true, Default: true, Codec: "aac", Index: 1, Channels: 2, SamplingRate: 48000, StreamIdentifier: "2", DisplayTitle: "Audio", ExtendedDisplayTitle: "Audio (AAC Stereo)"}}
 	}
 	if available {
 		p.Accessible = truePointer()
 		p.Exists = truePointer()
 	}
-	return media{ID: int(mediaObjectID(kind, sourceID)), Duration: duration, Bitrate: bitrate, Width: 1920, Height: 1080, AspectRatio: 1.78, AudioChannels: 2, AudioCodec: "aac", VideoCodec: "h264", VideoResolution: "1080", Container: extension, VideoFrameRate: "NTSC", OptimizedForStreaming: 0, Has64BitOffsets: false, VideoProfile: "high", HasVoiceActivity: false, Part: []part{p}}
+	result := media{ID: int(mediaObjectID(kind, sourceID)), Duration: duration, Bitrate: bitrate, Width: 1920, Height: 1080, AspectRatio: 1.78, AudioChannels: 2, AudioCodec: "aac", VideoCodec: "h264", VideoResolution: "1080", Container: extension, VideoFrameRate: "NTSC", OptimizedForStreaming: 0, Has64BitOffsets: false, VideoProfile: "high", HasVoiceActivity: false, Part: []part{p}}
+	if facts.State == "inspected" {
+		applyMediaFacts(&result, kind, sourceID, facts, detail)
+	}
+	return result
+}
+
+func applyMediaFacts(result *media, kind, sourceID string, facts canonical.MediaFacts, detail bool) {
+	if len(facts.Video) > 0 {
+		video := facts.Video[0]
+		result.VideoCodec, result.VideoProfile = video.Codec, video.Profile
+		result.Width, result.Height = video.Width, video.Height
+		if video.Width > 0 && video.Height > 0 {
+			result.AspectRatio = math.Round(float64(video.Width)/float64(video.Height)*100) / 100
+		}
+		result.VideoResolution = strconv.Itoa(video.Height)
+		if video.FrameRate > 0 {
+			result.VideoFrameRate = frameRateLabel(video.FrameRate)
+		}
+		result.Part[0].VideoProfile = video.Profile
+	}
+	if len(facts.Audio) > 0 {
+		audio := facts.Audio[0]
+		result.AudioCodec, result.AudioChannels = audio.Codec, audio.Channels
+	}
+	if !detail {
+		return
+	}
+	streams := make([]stream, 0, len(facts.Video)+len(facts.Audio)+len(facts.Subtitles))
+	for index, value := range facts.Video {
+		id := videoStreamObjectID(kind, sourceID)
+		if index > 0 {
+			id = stableNumericID('7', "xtream:"+kind+":"+sourceID+":video:"+strconv.Itoa(value.Index))
+		}
+		streams = append(streams, stream{ID: int(id), StreamType: 1, Default: plexBool(value.Default), Codec: value.Codec, Index: value.Index, BitDepth: value.BitDepth, ChromaLocation: value.ChromaLocation, ChromaSubsampling: value.ChromaSubsampling, CodedHeight: value.CodedHeight, CodedWidth: value.CodedWidth, FrameRate: plexFrameRatePointer(value.FrameRate), Height: value.Height, Width: value.Width, Level: value.Level, Profile: value.Profile, RefFrames: value.RefFrames, StreamIdentifier: strconv.Itoa(value.Index + 1), DisplayTitle: strings.ToUpper(value.Codec) + " Video", ExtendedDisplayTitle: strings.ToUpper(value.Codec) + " Video", PixelFormat: value.PixelFormat, ColorSpace: value.ColorSpace, ColorTrc: value.ColorTransfer, ColorPrimaries: value.ColorPrimaries})
+	}
+	for index, value := range facts.Audio {
+		id := audioStreamObjectID(kind, sourceID)
+		if index > 0 {
+			id = stableNumericID('8', "xtream:"+kind+":"+sourceID+":audio:"+strconv.Itoa(value.Index))
+		}
+		title := firstNonEmptyString(value.Title, strings.ToUpper(value.Codec)+" Audio")
+		streams = append(streams, stream{ID: int(id), StreamType: 2, Selected: plexBool(value.Default), Default: plexBool(value.Default), Codec: value.Codec, Index: value.Index, Bitrate: value.BitrateKbps, Profile: value.Profile, Channels: value.Channels, SamplingRate: value.SampleRate, StreamIdentifier: strconv.Itoa(value.Index + 1), DisplayTitle: title, ExtendedDisplayTitle: title, Language: value.Language, Title: value.Title, ChannelLayout: value.ChannelLayout})
+	}
+	for _, value := range facts.Subtitles {
+		codec := value.Codec
+		if codec == "subrip" {
+			codec = "srt"
+		}
+		title := firstNonEmptyString(value.Title, value.Language, "Subtitle")
+		streams = append(streams, stream{ID: int(subtitleStreamObjectID(kind, sourceID, value.Index)), StreamType: 3, Selected: plexBool(value.Default), Default: plexBool(value.Default), Forced: plexBool(value.Forced), Codec: codec, Index: value.Index, StreamIdentifier: strconv.Itoa(value.Index + 1), DisplayTitle: title, ExtendedDisplayTitle: title, Language: value.Language, Title: value.Title})
+	}
+	result.Part[0].Stream = streams
+}
+
+func plexFrameRatePointer(value float64) *plexFrameRate {
+	if value <= 0 {
+		return nil
+	}
+	rate := plexFrameRate(value)
+	return &rate
+}
+
+func frameRateLabel(value float64) string {
+	if value > 23 && value < 25 {
+		return "24p"
+	}
+	if value > 29 && value < 31 {
+		return "NTSC"
+	}
+	return strconv.FormatFloat(value, 'f', 3, 64)
 }
 
 func (h *realCatalogHandler) thumbPath(key string) string {
@@ -623,7 +736,7 @@ func (h *realCatalogHandler) playableByPartID(id int64) (catalogPlayable, bool) 
 	for i := range snapshot.Movies {
 		item := &snapshot.Movies[i]
 		if partObjectID("movie", item.SourceID) == id {
-			return catalogPlayable{Kind: "movie", RatingKey: movieObjectID(*item), SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, Movie: item}, true
+			return catalogPlayable{Kind: "movie", RatingKey: movieObjectID(*item), SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: item}, true
 		}
 	}
 	for si := range snapshot.Shows {
@@ -633,7 +746,7 @@ func (h *realCatalogHandler) playableByPartID(id int64) (catalogPlayable, bool) 
 			for ei := range season.Episodes {
 				episode := &season.Episodes[ei]
 				if partObjectID("episode", episode.SourceID) == id {
-					return catalogPlayable{Kind: "episode", RatingKey: episodeObjectID(*episode), SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, Show: show, Season: season, Episode: episode}, true
+					return catalogPlayable{Kind: "episode", RatingKey: episodeObjectID(*episode), SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
 				}
 			}
 		}
@@ -907,10 +1020,18 @@ func (h *realCatalogHandler) createPlayQueue(w http.ResponseWriter, r *http.Requ
 	uriKey := metadataKeyFromURI(r.URL.Query().Get("uri"))
 	selectedKey := metadataKeyFromURI(r.URL.Query().Get("key"))
 	contextKey := ""
-	if _, ok := h.catalog.metadataKind(uriKey); ok {
+	uriKind, virtualURI := h.catalog.metadataKind(uriKey)
+	if virtualURI {
 		contextKey = uriKey
 	}
 	item, selected := h.catalog.playable(selectedKey)
+	if !selected && selectedKey == "" && uriKind == "show" {
+		item, selected = h.catalog.firstPlayableEpisode(uriKey)
+		if !selected {
+			writeJSONStatus(w, http.StatusNotFound, map[string]any{"MediaContainer": map[string]any{"size": 0, "playQueueTotalCount": 0, "Metadata": []any{}}})
+			return true
+		}
+	}
 	if !selected {
 		item, selected = h.catalog.playable(uriKey)
 	}
@@ -952,7 +1073,7 @@ func (h *realCatalogHandler) queueMovie(item catalogPlayable) movie {
 	}
 	episode := item.Episode
 	timestamp := itemTimestamp(item.Show.Revision)
-	result := movie{RatingKey: item.RatingKey, Key: "/library/metadata/" + item.RatingKey, GUID: "local://" + item.RatingKey, Type: "episode", Title: item.Title, Slug: slugify(item.Title, ""), Thumb: h.thumbPath(item.RatingKey), Art: h.artPath(showObjectID(*item.Show)), Summary: episode.Details.Plot, Duration: item.Duration, AddedAt: timestamp, UpdatedAt: timestamp, LibrarySectionID: 2, LibrarySectionKey: "/library/sections/2", LibrarySectionTitle: tvLibraryName, LibrarySectionUUID: tvLibraryUUID, Media: []media{h.mediaModel("episode", item.SourceID, item.Extension, item.Duration, item.Bitrate, 0, true, true)}}
+	result := movie{RatingKey: item.RatingKey, Key: "/library/metadata/" + item.RatingKey, GUID: "local://" + item.RatingKey, Type: "episode", Title: item.Title, Slug: slugify(item.Title, ""), Thumb: h.thumbPath(item.RatingKey), Art: h.artPath(showObjectID(*item.Show)), Summary: episode.Details.Plot, Duration: item.Duration, AddedAt: timestamp, UpdatedAt: timestamp, LibrarySectionID: 2, LibrarySectionKey: "/library/sections/2", LibrarySectionTitle: tvLibraryName, LibrarySectionUUID: tvLibraryUUID, Media: []media{h.mediaModel("episode", item.SourceID, item.Extension, item.Duration, item.Bitrate, 0, true, true, item.MediaFacts)}}
 	return result
 }
 func (h *realCatalogHandler) writePlayQueue(w http.ResponseWriter, r *http.Request, id int64, item catalogPlayable, contextKey string) {
@@ -965,6 +1086,18 @@ func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Reques
 	item, ok := h.catalog.playable(key)
 	if !ok {
 		return false
+	}
+	item.MediaFacts = h.lazyMediaFacts(r.Context(), item, item.MediaFacts.Size)
+	if item.Movie != nil {
+		item.Movie.MediaFacts = item.MediaFacts
+	}
+	if item.Episode != nil {
+		item.Episode.MediaFacts = item.MediaFacts
+	}
+	if reason := unsupportedDirectPlayReason(r, item.MediaFacts); reason != "" {
+		addCommonHeaders(w)
+		http.Error(w, reason, http.StatusUnprocessableEntity)
+		return true
 	}
 	projected := h.queueMovie(item)
 	projected.Media[0].Selected = truePointer()
@@ -982,6 +1115,19 @@ func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Reques
 	}
 	writeNegotiatedMediaContainer(w, r, container)
 	return true
+}
+
+func unsupportedDirectPlayReason(r *http.Request, facts canonical.MediaFacts) string {
+	platform := firstNonEmptyString(r.Header.Get("X-Plex-Platform"), r.URL.Query().Get("X-Plex-Platform"))
+	if !strings.EqualFold(platform, "Roku") || facts.State != "inspected" {
+		return ""
+	}
+	for _, audio := range facts.Audio {
+		if audio.Codec == "aac" && audio.Channels > 2 {
+			return "media requires AAC multichannel audio transcoding, which WonkVOD does not provide"
+		}
+	}
+	return ""
 }
 func (h *realCatalogHandler) acknowledgeVirtualState(w http.ResponseWriter, r *http.Request) bool {
 	key := firstNonEmptyString(r.URL.Query().Get("ratingKey"), metadataKeyFromURI(r.URL.Query().Get("key")))

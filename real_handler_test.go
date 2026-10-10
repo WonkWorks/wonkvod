@@ -50,13 +50,14 @@ func realCatalogTestHandler(t *testing.T) (*realCatalogHandler, *canonicalSnapsh
 		Movies: []canonicalMovie{{
 			SourceID: "movie-1", Category: catalogCategory{ID: "917", Name: realMovieCategoryName, Count: 1},
 			Title: "Fixture Movie", Year: "2024", Extension: "mp4", Revision: "1700000001",
-			Details: canonical.MovieDetails{ID: "movie-1", Title: "Fixture Movie", Plot: "Movie plot", Premiere: "2024-01-02", DurationMillis: 120000, Bitrate: 1500, Rating: "7.5", TMDBID: "123", Poster: upstream.URL + "/poster.png", Fanart: upstream.URL + "/fanart.png", Extension: "mp4"},
+			Details:    canonical.MovieDetails{ID: "movie-1", Title: "Fixture Movie", Plot: "Movie plot", Premiere: "2024-01-02", DurationMillis: 120000, Bitrate: 1500, Rating: "7.5", TMDBID: "123", Poster: upstream.URL + "/poster.png", Fanart: upstream.URL + "/fanart.png", Extension: "mp4"},
+			MediaFacts: fixtureMediaFacts("mp4", 120000, 1500),
 		}},
 		Shows: []canonicalShow{{
 			SourceID: "show-1", Category: catalogCategory{ID: "887", Name: realTVCategoryName, Count: 1},
 			Title: "Fixture Show", Year: "2023", Revision: "1700000002",
 			Details: canonical.SeriesDetails{ID: "show-1", Title: "Fixture Show", Plot: "Show plot", Poster: upstream.URL + "/poster.png", Fanart: upstream.URL + "/fanart.png"},
-			Seasons: []canonicalSeason{{Number: 1, Poster: upstream.URL + "/poster.png", Episodes: []canonicalEpisode{{SourceID: "episode-1", Season: 1, Number: 2, Extension: "mp4", Details: canonical.EpisodeDetails{ID: "episode-1", Title: "Fixture Episode", Season: 1, Number: 2, Plot: "Episode plot", DurationMillis: 60000, Bitrate: 800, Artwork: upstream.URL + "/fanart.png", Extension: "mp4"}}}}},
+			Seasons: []canonicalSeason{{Number: 1, Poster: upstream.URL + "/poster.png", Episodes: []canonicalEpisode{{SourceID: "episode-1", Season: 1, Number: 2, Extension: "mp4", Details: canonical.EpisodeDetails{ID: "episode-1", Title: "Fixture Episode", Season: 1, Number: 2, Plot: "Episode plot", DurationMillis: 60000, Bitrate: 800, Artwork: upstream.URL + "/fanart.png", Extension: "mp4"}, MediaFacts: fixtureMediaFacts("mp4", 60000, 800)}}}},
 		}},
 	}
 	runtime := &catalogRuntime{client: client, snapshot: snapshot, sources: make(map[string]*xtream.VODSource), capabilities: make(map[string]xtream.CapabilityProbe)}
@@ -68,6 +69,10 @@ func realCatalogTestHandler(t *testing.T) (*realCatalogHandler, *canonicalSnapsh
 	handler := &realCatalogHandler{catalog: runtime, passthrough: passthrough, httpClient: upstream.Client(), queues: make(map[int64]virtualPlayQueue)}
 	handler.queueID.Store(1000)
 	return handler, &snapshot, mediaBytes
+}
+
+func fixtureMediaFacts(container string, duration, bitrate int) canonical.MediaFacts {
+	return canonical.MediaFacts{State: "inspected", Container: container, DurationMS: int64(duration), BitrateKbps: bitrate, Video: []canonical.VideoStream{{Index: 0, Codec: "h264", Profile: "high", Level: 41, Width: 1920, Height: 1080, CodedWidth: 1920, CodedHeight: 1080, FrameRate: 30, BitDepth: 8, PixelFormat: "yuv420p", ChromaLocation: "left", ChromaSubsampling: "4:2:0", RefFrames: 4, Default: true}}, Audio: []canonical.AudioStream{{Index: 1, Codec: "aac", Profile: "lc", Channels: 2, ChannelLayout: "stereo", SampleRate: 48000, Default: true}}}
 }
 
 func performRealRequest(handler http.Handler, method, target, accept string, body io.Reader) *httptest.ResponseRecorder {
@@ -257,6 +262,27 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 			t.Fatalf("GET queue did not retain episode: %#v", read)
 		}
 	}
+	showQueueTarget := "/playQueues?type=video&continuous=0&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+showID)
+	showQueue := decodeContainer(t, performRealRequest(handler, http.MethodPost, showQueueTarget, "application/json", nil))
+	showSelected := showQueue["Metadata"].([]any)[0].(map[string]any)
+	if showSelected["ratingKey"] != episodeID || showSelected["type"] != "episode" {
+		t.Fatalf("show-level queue selected %#v", showSelected)
+	}
+	showQueueID := int64(showQueue["playQueueID"].(float64))
+	showQueueRead := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/playQueues/"+strconv.FormatInt(showQueueID, 10), "application/json", nil))
+	if showQueueRead["Metadata"].([]any)[0].(map[string]any)["ratingKey"] != episodeID {
+		t.Fatalf("show-level GET queue lost selection: %#v", showQueueRead)
+	}
+
+	emptyShow := canonicalShow{SourceID: "empty-show", Title: "Empty Show", Seasons: []canonicalSeason{{Number: 1}}}
+	handler.catalog.mu.Lock()
+	handler.catalog.snapshot.Shows = append(handler.catalog.snapshot.Shows, emptyShow)
+	handler.catalog.mu.Unlock()
+	emptyTarget := "/playQueues?type=video&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+showObjectID(emptyShow))
+	emptyResponse := performRealRequest(handler, http.MethodPost, emptyTarget, "application/json", nil)
+	if emptyResponse.Code != http.StatusNotFound || emptyResponse.Header().Get("X-Test-Upstream") != "" {
+		t.Fatalf("empty virtual show status=%d upstream=%q body=%s", emptyResponse.Code, emptyResponse.Header().Get("X-Test-Upstream"), emptyResponse.Body.String())
+	}
 
 	decision := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/video/:/transcode/universal/decision?path="+url.QueryEscape("/library/metadata/"+episodeID), "application/json", nil))
 	selected := decision["Metadata"].([]any)[0].(map[string]any)
@@ -273,6 +299,21 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 	fallbackResponse = performRealRequest(handler, http.MethodPost, malformed, "application/json", nil)
 	if fallbackResponse.Code != http.StatusTeapot || fallbackResponse.Header().Get("X-Test-Upstream") != "true" {
 		t.Fatal("malformed TV queue did not fall through")
+	}
+}
+
+func TestFirstPlayableEpisodeSkipsUnplayableEntries(t *testing.T) {
+	handler, _, _ := realCatalogTestHandler(t)
+	show := canonicalShow{SourceID: "ordered-show", Title: "Ordered Show", Seasons: []canonicalSeason{
+		{Number: 1, Episodes: []canonicalEpisode{{Season: 1, Number: 1}, {SourceID: "first-playable", Season: 1, Number: 2, Extension: "mkv", Details: canonical.EpisodeDetails{Title: "First playable"}}}},
+		{Number: 2, Episodes: []canonicalEpisode{{SourceID: "later", Season: 2, Number: 1, Extension: "mkv"}}},
+	}}
+	handler.catalog.mu.Lock()
+	handler.catalog.snapshot.Shows = []canonicalShow{show}
+	handler.catalog.mu.Unlock()
+	selected, ok := handler.catalog.firstPlayableEpisode(showObjectID(show))
+	if !ok || selected.SourceID != "first-playable" || selected.Season.Number != 1 || selected.Episode.Number != 2 {
+		t.Fatalf("selected=%#v ok=%t", selected, ok)
 	}
 }
 
@@ -308,6 +349,45 @@ func TestMediaCopyTerminationOwnership(t *testing.T) {
 	upstreamErr := errors.New("upstream read")
 	if got := mediaCopyTermination(context.Background(), upstreamErr, nil, upstreamErr); got != "upstream_read_error" {
 		t.Fatalf("upstream failure classified as %q", got)
+	}
+}
+
+func TestTruthfulMediaFactsProjectionPreservesVirtualIDs(t *testing.T) {
+	handler, _, _ := realCatalogTestHandler(t)
+	facts := canonical.MediaFacts{State: "inspected", Container: "mkv", DurationMS: 5651114, BitrateKbps: 2075, Size: 1465406864,
+		Video:     []canonical.VideoStream{{Index: 0, Codec: "hevc", Profile: "main", Level: 120, Width: 1920, Height: 1080, CodedWidth: 1920, CodedHeight: 1080, FrameRate: 24000.0 / 1001.0, BitDepth: 8, PixelFormat: "yuv420p", ChromaLocation: "left", ChromaSubsampling: "4:2:0", RefFrames: 1, ColorSpace: "bt709", ColorTransfer: "bt709", ColorPrimaries: "bt709", Default: true}},
+		Audio:     []canonical.AudioStream{{Index: 1, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1", SampleRate: 48000, Language: "eng", Title: "Surround", Default: true}},
+		Subtitles: []canonical.TextStream{{Index: 2, Codec: "subrip", Language: "eng"}, {Index: 3, Codec: "subrip", Language: "eng", Title: "SDH"}}}
+	projected := handler.mediaModel("movie", "4601568", "mkv", 5651000, 2075, 0, true, true, facts)
+	if projected.ID != int(mediaObjectID("movie", "4601568")) || projected.Part[0].ID != int(partObjectID("movie", "4601568")) {
+		t.Fatalf("virtual IDs changed: %#v", projected)
+	}
+	if projected.VideoCodec != "hevc" || projected.VideoProfile != "main" || projected.AudioCodec != "aac" || projected.AudioChannels != 6 || projected.Duration != 5651114 || projected.Bitrate != 2075 {
+		t.Fatalf("media projection=%#v", projected)
+	}
+	streams := projected.Part[0].Stream
+	if len(streams) != 4 || streams[0].ID != int(videoStreamObjectID("movie", "4601568")) || streams[1].ID != int(audioStreamObjectID("movie", "4601568")) {
+		t.Fatalf("streams=%#v", streams)
+	}
+	if streams[0].Codec != "hevc" || streams[0].Level != 120 || streams[0].BitDepth != 8 || streams[0].FrameRate == nil || streams[1].Channels != 6 || streams[1].ChannelLayout != "5.1" || streams[2].Codec != "srt" || streams[3].Title != "SDH" {
+		t.Fatalf("stream semantics=%#v", streams)
+	}
+}
+
+func TestRokuDecisionDoesNotClaimDirectPlayForMultichannelAAC(t *testing.T) {
+	handler, snapshot, _ := realCatalogTestHandler(t)
+	snapshot.Movies[0].MediaFacts.Audio[0].Channels = 6
+	handler.catalog.mu.Lock()
+	handler.catalog.snapshot = *snapshot
+	handler.catalog.mu.Unlock()
+	movieID := movieObjectID(snapshot.Movies[0])
+	request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?path="+url.QueryEscape("/library/metadata/"+movieID), nil)
+	request.Header.Set("Accept", "application/json")
+	request.Header.Set("X-Plex-Platform", "Roku")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusUnprocessableEntity || !strings.Contains(response.Body.String(), "does not provide") {
+		t.Fatalf("status=%d body=%q", response.Code, response.Body.String())
 	}
 }
 

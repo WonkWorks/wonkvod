@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"log"
+	"math"
 	"mime"
 	"net"
 	"net/http"
@@ -99,7 +100,11 @@ func (value *plexBool) UnmarshalText(text []byte) error {
 type plexFrameRate float64
 
 func (value plexFrameRate) MarshalJSON() ([]byte, error) {
-	return []byte(strconv.FormatFloat(float64(value), 'f', 1, 64)), nil
+	precision := 3
+	if math.Abs(float64(value)-math.Round(float64(value))) < 0.0005 {
+		precision = 1
+	}
+	return []byte(strconv.FormatFloat(float64(value), 'f', precision, 64)), nil
 }
 
 func (value plexFrameRate) MarshalText() ([]byte, error) {
@@ -250,7 +255,7 @@ type stream struct {
 	Default              plexBool       `json:"default" xml:"default,attr"`
 	Codec                string         `json:"codec" xml:"codec,attr"`
 	Index                int            `json:"index" xml:"index,attr"`
-	Bitrate              int            `json:"bitrate" xml:"bitrate,attr"`
+	Bitrate              int            `json:"bitrate,omitempty" xml:"bitrate,attr,omitempty"`
 	BitDepth             int            `json:"bitDepth,omitempty" xml:"bitDepth,attr,omitempty"`
 	ChromaLocation       string         `json:"chromaLocation,omitempty" xml:"chromaLocation,attr,omitempty"`
 	ChromaSubsampling    string         `json:"chromaSubsampling,omitempty" xml:"chromaSubsampling,attr,omitempty"`
@@ -266,6 +271,14 @@ type stream struct {
 	ScanType             string         `json:"scanType,omitempty" xml:"scanType,attr,omitempty"`
 	Channels             int            `json:"channels,omitempty" xml:"channels,attr,omitempty"`
 	SamplingRate         int            `json:"samplingRate,omitempty" xml:"samplingRate,attr,omitempty"`
+	Language             string         `json:"language,omitempty" xml:"language,attr,omitempty"`
+	Title                string         `json:"title,omitempty" xml:"title,attr,omitempty"`
+	ChannelLayout        string         `json:"audioChannelLayout,omitempty" xml:"audioChannelLayout,attr,omitempty"`
+	PixelFormat          string         `json:"pixelFormat,omitempty" xml:"pixelFormat,attr,omitempty"`
+	ColorSpace           string         `json:"colorSpace,omitempty" xml:"colorSpace,attr,omitempty"`
+	ColorTrc             string         `json:"colorTrc,omitempty" xml:"colorTrc,attr,omitempty"`
+	ColorPrimaries       string         `json:"colorPrimaries,omitempty" xml:"colorPrimaries,attr,omitempty"`
+	Forced               plexBool       `json:"forced,omitempty" xml:"forced,attr,omitempty"`
 	StreamIdentifier     string         `json:"streamIdentifier" xml:"streamIdentifier,attr"`
 	DisplayTitle         string         `json:"displayTitle" xml:"displayTitle,attr"`
 	ExtendedDisplayTitle string         `json:"extendedDisplayTitle" xml:"extendedDisplayTitle,attr"`
@@ -289,6 +302,13 @@ func addCommonHeaders(w http.ResponseWriter) {
 func writeJSON(w http.ResponseWriter, body any) {
 	addCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(body)
+}
+
+func writeJSONStatus(w http.ResponseWriter, status int, body any) {
+	addCommonHeaders(w)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
 }
 

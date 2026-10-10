@@ -18,6 +18,7 @@ import (
 	"time"
 
 	canonical "wonkvod/internal/catalog"
+	"wonkvod/internal/mediaprobe"
 	"wonkvod/internal/xtream"
 )
 
@@ -43,21 +44,23 @@ type catalogCategory struct {
 }
 
 type canonicalMovie struct {
-	SourceID  string                 `json:"source_id"`
-	Category  catalogCategory        `json:"category"`
-	Title     string                 `json:"title"`
-	Year      string                 `json:"year,omitempty"`
-	Extension string                 `json:"extension"`
-	Revision  string                 `json:"revision,omitempty"`
-	Details   canonical.MovieDetails `json:"details"`
+	SourceID   string                 `json:"source_id"`
+	Category   catalogCategory        `json:"category"`
+	Title      string                 `json:"title"`
+	Year       string                 `json:"year,omitempty"`
+	Extension  string                 `json:"extension"`
+	Revision   string                 `json:"revision,omitempty"`
+	Details    canonical.MovieDetails `json:"details"`
+	MediaFacts canonical.MediaFacts   `json:"media_facts,omitzero"`
 }
 
 type canonicalEpisode struct {
-	SourceID  string                   `json:"source_id"`
-	Season    int                      `json:"season"`
-	Number    int                      `json:"number"`
-	Extension string                   `json:"extension"`
-	Details   canonical.EpisodeDetails `json:"details"`
+	SourceID   string                   `json:"source_id"`
+	Season     int                      `json:"season"`
+	Number     int                      `json:"number"`
+	Extension  string                   `json:"extension"`
+	Details    canonical.EpisodeDetails `json:"details"`
+	MediaFacts canonical.MediaFacts     `json:"media_facts,omitzero"`
 }
 
 type canonicalSeason struct {
@@ -100,6 +103,8 @@ type catalogRuntime struct {
 	snapshot     canonicalSnapshot
 	sources      map[string]*xtream.VODSource
 	capabilities map[string]xtream.CapabilityProbe
+	inspections  sync.Map
+	persistMu    sync.Mutex
 }
 
 func newCatalogRuntime() (*catalogRuntime, error) {
@@ -129,6 +134,7 @@ func newCatalogRuntime() (*catalogRuntime, error) {
 		log.Printf("real catalog refresh failed; retaining snapshot generated=%s", previous.GeneratedAt.Format(time.RFC3339))
 		runtime.snapshot = previous
 	} else {
+		mergeMediaFacts(&current, previous)
 		runtime.snapshot = current
 		if err := saveCanonicalSnapshot(statePath, current); err != nil {
 			return nil, fmt.Errorf("real catalog: persist snapshot: %w", err)
@@ -150,7 +156,12 @@ func (c *catalogRuntime) refreshLoop() {
 			log.Printf("real catalog background refresh failed; previous snapshot retained")
 			continue
 		}
+		c.persistMu.Lock()
+		c.mu.Lock()
+		mergeMediaFacts(&next, c.snapshot)
+		c.mu.Unlock()
 		if err := saveCanonicalSnapshot(c.statePath, next); err != nil {
+			c.persistMu.Unlock()
 			log.Printf("real catalog snapshot persist failed; previous snapshot retained")
 			continue
 		}
@@ -159,6 +170,7 @@ func (c *catalogRuntime) refreshLoop() {
 		c.sources = make(map[string]*xtream.VODSource)
 		c.capabilities = make(map[string]xtream.CapabilityProbe)
 		c.mu.Unlock()
+		c.persistMu.Unlock()
 		c.logSummary(next)
 	}
 }
@@ -449,6 +461,12 @@ func validateStableIDs(snapshot canonicalSnapshot) error {
 				return err
 			}
 		}
+		for _, subtitle := range movie.MediaFacts.Subtitles {
+			value := "xtream:movie:" + movie.SourceID + ":subtitle:" + strconv.Itoa(subtitle.Index)
+			if err := claim(stableNumericID('9', value), value); err != nil {
+				return err
+			}
+		}
 	}
 	for _, show := range snapshot.Shows {
 		showIdentity := "xtream:show:" + show.SourceID
@@ -470,6 +488,12 @@ func validateStableIDs(snapshot canonicalSnapshot) error {
 						return err
 					}
 				}
+				for _, subtitle := range episode.MediaFacts.Subtitles {
+					value := "xtream:episode:" + episode.SourceID + ":subtitle:" + strconv.Itoa(subtitle.Index)
+					if err := claim(stableNumericID('9', value), value); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -486,17 +510,18 @@ func firstNonEmptyString(values ...string) string {
 }
 
 type catalogPlayable struct {
-	Kind      string
-	RatingKey string
-	SourceID  string
-	Extension string
-	Title     string
-	Duration  int
-	Bitrate   int
-	Movie     *canonicalMovie
-	Show      *canonicalShow
-	Season    *canonicalSeason
-	Episode   *canonicalEpisode
+	Kind       string
+	RatingKey  string
+	SourceID   string
+	Extension  string
+	Title      string
+	Duration   int
+	Bitrate    int
+	MediaFacts canonical.MediaFacts
+	Movie      *canonicalMovie
+	Show       *canonicalShow
+	Season     *canonicalSeason
+	Episode    *canonicalEpisode
 }
 
 func movieObjectID(movie canonicalMovie) string {
@@ -531,12 +556,16 @@ func audioStreamObjectID(kind, sourceID string) int64 {
 	return stableNumericID('8', "xtream:"+kind+":"+sourceID+":audio")
 }
 
+func subtitleStreamObjectID(kind, sourceID string, index int) int64 {
+	return stableNumericID('9', "xtream:"+kind+":"+sourceID+":subtitle:"+strconv.Itoa(index))
+}
+
 func (c *catalogRuntime) playable(ratingKey string) (catalogPlayable, bool) {
 	snapshot := c.snapshotCopy()
 	for index := range snapshot.Movies {
 		item := &snapshot.Movies[index]
 		if movieObjectID(*item) == ratingKey {
-			return catalogPlayable{Kind: "movie", RatingKey: ratingKey, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, Movie: item}, true
+			return catalogPlayable{Kind: "movie", RatingKey: ratingKey, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: item}, true
 		}
 	}
 	for showIndex := range snapshot.Shows {
@@ -546,7 +575,7 @@ func (c *catalogRuntime) playable(ratingKey string) (catalogPlayable, bool) {
 			for episodeIndex := range season.Episodes {
 				episode := &season.Episodes[episodeIndex]
 				if episodeObjectID(*episode) == ratingKey {
-					return catalogPlayable{Kind: "episode", RatingKey: ratingKey, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, Show: show, Season: season, Episode: episode}, true
+					return catalogPlayable{Kind: "episode", RatingKey: ratingKey, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
 				}
 			}
 		}
@@ -580,6 +609,28 @@ func (c *catalogRuntime) metadataKind(ratingKey string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (c *catalogRuntime) firstPlayableEpisode(showRatingKey string) (catalogPlayable, bool) {
+	snapshot := c.snapshotCopy()
+	for showIndex := range snapshot.Shows {
+		show := &snapshot.Shows[showIndex]
+		if showObjectID(*show) != showRatingKey {
+			continue
+		}
+		for seasonIndex := range show.Seasons {
+			season := &show.Seasons[seasonIndex]
+			for episodeIndex := range season.Episodes {
+				episode := &season.Episodes[episodeIndex]
+				if strings.TrimSpace(episode.SourceID) == "" || strings.TrimSpace(episode.Extension) == "" {
+					continue
+				}
+				return catalogPlayable{Kind: "episode", RatingKey: episodeObjectID(*episode), SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
+			}
+		}
+		return catalogPlayable{}, false
+	}
+	return catalogPlayable{}, false
 }
 
 func (c *catalogRuntime) source(item catalogPlayable) (*xtream.VODSource, error) {
@@ -630,6 +681,120 @@ func (c *catalogRuntime) capability(ctx context.Context, item catalogPlayable) (
 	c.capabilities[key] = capability
 	c.mu.Unlock()
 	return capability, nil
+}
+
+func mergeMediaFacts(next *canonicalSnapshot, previous canonicalSnapshot) {
+	movies := make(map[string]canonical.MediaFacts, len(previous.Movies))
+	for _, item := range previous.Movies {
+		movies[item.SourceID] = item.MediaFacts
+	}
+	for index := range next.Movies {
+		if facts := movies[next.Movies[index].SourceID]; facts.State != "" {
+			next.Movies[index].MediaFacts = facts
+		}
+	}
+	episodes := make(map[string]canonical.MediaFacts)
+	for _, show := range previous.Shows {
+		for _, season := range show.Seasons {
+			for _, episode := range season.Episodes {
+				episodes[episode.SourceID] = episode.MediaFacts
+			}
+		}
+	}
+	for showIndex := range next.Shows {
+		for seasonIndex := range next.Shows[showIndex].Seasons {
+			for episodeIndex := range next.Shows[showIndex].Seasons[seasonIndex].Episodes {
+				episode := &next.Shows[showIndex].Seasons[seasonIndex].Episodes[episodeIndex]
+				if facts := episodes[episode.SourceID]; facts.State != "" {
+					episode.MediaFacts = facts
+				}
+			}
+		}
+	}
+}
+
+func (c *catalogRuntime) inspectMedia(ctx context.Context, item catalogPlayable, knownSize int64) (canonical.MediaFacts, error) {
+	if item.MediaFacts.State == "inspected" {
+		return item.MediaFacts, nil
+	}
+	key := item.Kind + ":" + item.SourceID
+	lockValue, _ := c.inspections.LoadOrStore(key, &sync.Mutex{})
+	lock := lockValue.(*sync.Mutex)
+	lock.Lock()
+	defer lock.Unlock()
+	if refreshed, ok := c.playable(item.RatingKey); ok && refreshed.MediaFacts.State == "inspected" {
+		return refreshed.MediaFacts, nil
+	}
+	source, err := c.source(item)
+	if err != nil {
+		return canonical.MediaFacts{State: "retryable"}, err
+	}
+	resp, err := source.Open(ctx, http.MethodGet, fmt.Sprintf("bytes=0-%d", mediaprobe.MaxProbeBytes-1))
+	if err != nil {
+		facts := canonical.MediaFacts{State: "retryable"}
+		c.storeMediaFacts(item, facts)
+		return facts, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
+		state := "retryable"
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
+			state = "unavailable"
+		}
+		facts := canonical.MediaFacts{State: state}
+		c.storeMediaFacts(item, facts)
+		return facts, fmt.Errorf("media inspection returned HTTP %d", resp.StatusCode)
+	}
+	if knownSize <= 0 {
+		knownSize = mediaResponseSize(resp)
+	}
+	facts, probeErr := mediaprobe.Probe(ctx, resp.Body, knownSize)
+	c.storeMediaFacts(item, facts)
+	return facts, probeErr
+}
+
+func mediaResponseSize(resp *http.Response) int64 {
+	if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 {
+		return resp.ContentLength
+	}
+	value := resp.Header.Get("Content-Range")
+	if slash := strings.LastIndexByte(value, '/'); slash >= 0 {
+		size, _ := strconv.ParseInt(value[slash+1:], 10, 64)
+		return size
+	}
+	return 0
+}
+
+func (c *catalogRuntime) storeMediaFacts(item catalogPlayable, facts canonical.MediaFacts) {
+	c.persistMu.Lock()
+	defer c.persistMu.Unlock()
+	c.mu.Lock()
+	for index := range c.snapshot.Movies {
+		if c.snapshot.Movies[index].SourceID == item.SourceID && item.Kind == "movie" {
+			c.snapshot.Movies[index].MediaFacts = facts
+		}
+	}
+	for showIndex := range c.snapshot.Shows {
+		for seasonIndex := range c.snapshot.Shows[showIndex].Seasons {
+			for episodeIndex := range c.snapshot.Shows[showIndex].Seasons[seasonIndex].Episodes {
+				episode := &c.snapshot.Shows[showIndex].Seasons[seasonIndex].Episodes[episodeIndex]
+				if episode.SourceID == item.SourceID && item.Kind == "episode" {
+					episode.MediaFacts = facts
+				}
+			}
+		}
+	}
+	data, _ := json.Marshal(c.snapshot)
+	statePath := c.statePath
+	c.mu.Unlock()
+	if statePath != "" {
+		var snapshot canonicalSnapshot
+		if json.Unmarshal(data, &snapshot) == nil {
+			if err := saveCanonicalSnapshot(statePath, snapshot); err != nil {
+				log.Printf("media facts persist failed source_id=%q", item.SourceID)
+			}
+		}
+	}
 }
 
 func parsePositiveInt(value string) int {
