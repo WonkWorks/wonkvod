@@ -194,6 +194,29 @@ func TestRichMovieDetailShape(t *testing.T) {
 	}
 }
 
+func TestSyntheticMoviePrimaryGUIDExperimentIsIsolated(t *testing.T) {
+	item := syntheticMovie()
+	if item.GUID != "plex://movie/f4a0eda242f58b0a4e24106a" {
+		t.Fatalf("primary guid = %q", item.GUID)
+	}
+	if item.RatingKey != "1001" || item.Key != "/library/metadata/1001" {
+		t.Errorf("protected item identity changed: ratingKey=%q key=%q", item.RatingKey, item.Key)
+	}
+	if item.LibrarySectionID != 1 || item.LibrarySectionUUID != libraryUUID {
+		t.Errorf("protected library identity changed: id=%d uuid=%q", item.LibrarySectionID, item.LibrarySectionUUID)
+	}
+	if len(item.Guids) != 1 || item.Guids[0].ID != "tmdb://601860" {
+		t.Errorf("external Guid array changed: %#v", item.Guids)
+	}
+	core := coreSemantics(t, mediaContainer{Metadata: []movie{item}})
+	if core.Media.ID != 2001 || core.Part.ID != 3001 || core.Video.ID != 4001 || core.Audio.ID != 4002 {
+		t.Errorf("protected media identity changed: media=%d part=%d video=%d audio=%d", core.Media.ID, core.Part.ID, core.Video.ID, core.Audio.ID)
+	}
+	if core.Part.File != "/virtual/WonkPlex-Test-Movie.mp4" {
+		t.Errorf("virtual Part path changed: %q", core.Part.File)
+	}
+}
+
 func jsonKind(value any) string {
 	switch value := value.(type) {
 	case bool:

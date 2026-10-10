@@ -30,6 +30,7 @@ const (
 	libraryName = "WonkVOD Movies"
 
 	movieRatingKey = "1001"
+	movieGUID      = "plex://movie/f4a0eda242f58b0a4e24106a"
 	movieTitle     = "WonkVOD Test Movie"
 	movieAddedAt   = 1790899200
 	movieUpdatedAt = 1790899200
@@ -585,7 +586,7 @@ func syntheticMovie() movie {
 	return movie{
 		RatingKey:             movieRatingKey,
 		Key:                   "/library/metadata/" + movieRatingKey,
-		GUID:                  "wonkplex://movie/" + movieRatingKey,
+		GUID:                  movieGUID,
 		Type:                  "movie",
 		Title:                 movieTitle,
 		TitleSort:             movieTitle,
