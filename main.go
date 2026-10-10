@@ -909,6 +909,158 @@ func writeArtwork(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(artwork)
 }
 
+func photoTranscodeSource(sourceURL string) ([]byte, bool) {
+	switch sourceURL {
+	case movieThumbPath:
+		return posterArtwork, true
+	case movieArtPath:
+		return backgroundArtwork, true
+	default:
+		return nil, false
+	}
+}
+
+func photoTranscodeInteger(r *http.Request, name string) (int, error) {
+	rawValue := r.URL.Query().Get(name)
+	if rawValue == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(rawValue)
+	if err != nil || value < 0 || value > 4096 {
+		return 0, fmt.Errorf("invalid %s", name)
+	}
+	return value, nil
+}
+
+func photoTranscodeBool(r *http.Request, name string) (bool, error) {
+	rawValue := r.URL.Query().Get(name)
+	if rawValue == "" || rawValue == "0" || strings.EqualFold(rawValue, "false") {
+		return false, nil
+	}
+	if rawValue == "1" || strings.EqualFold(rawValue, "true") {
+		return true, nil
+	}
+	return false, fmt.Errorf("invalid %s", name)
+}
+
+func resizeArtwork(source []byte, requestedWidth, requestedHeight int, crop string, upscale bool) ([]byte, error) {
+	decoded, err := png.Decode(bytes.NewReader(source))
+	if err != nil {
+		return nil, fmt.Errorf("decode source artwork: %w", err)
+	}
+	sourceBounds := decoded.Bounds()
+	sourceWidth := sourceBounds.Dx()
+	sourceHeight := sourceBounds.Dy()
+	if requestedWidth == 0 && requestedHeight == 0 {
+		return source, nil
+	}
+
+	var scale float64
+	switch {
+	case requestedWidth > 0 && requestedHeight > 0 && crop == "center":
+		scale = max(
+			float64(requestedWidth)/float64(sourceWidth),
+			float64(requestedHeight)/float64(sourceHeight),
+		)
+	case requestedWidth > 0 && requestedHeight > 0:
+		scale = min(
+			float64(requestedWidth)/float64(sourceWidth),
+			float64(requestedHeight)/float64(sourceHeight),
+		)
+	case requestedWidth > 0:
+		scale = float64(requestedWidth) / float64(sourceWidth)
+	default:
+		scale = float64(requestedHeight) / float64(sourceHeight)
+	}
+	if !upscale && scale > 1 {
+		scale = 1
+	}
+
+	scaledWidth := max(1, int(float64(sourceWidth)*scale+0.5))
+	scaledHeight := max(1, int(float64(sourceHeight)*scale+0.5))
+	outputWidth := scaledWidth
+	outputHeight := scaledHeight
+	offsetX := 0
+	offsetY := 0
+	if crop == "center" && requestedWidth > 0 && requestedHeight > 0 {
+		outputWidth = requestedWidth
+		outputHeight = requestedHeight
+		offsetX = (scaledWidth - outputWidth) / 2
+		offsetY = (scaledHeight - outputHeight) / 2
+	}
+
+	transformed := image.NewRGBA(image.Rect(0, 0, outputWidth, outputHeight))
+	for y := 0; y < outputHeight; y++ {
+		scaledY := y + offsetY
+		if scaledY < 0 || scaledY >= scaledHeight {
+			continue
+		}
+		sourceY := sourceBounds.Min.Y + scaledY*sourceHeight/scaledHeight
+		for x := 0; x < outputWidth; x++ {
+			scaledX := x + offsetX
+			if scaledX < 0 || scaledX >= scaledWidth {
+				continue
+			}
+			sourceX := sourceBounds.Min.X + scaledX*sourceWidth/scaledWidth
+			transformed.Set(x, y, decoded.At(sourceX, sourceY))
+		}
+	}
+
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, transformed); err != nil {
+		return nil, fmt.Errorf("encode transformed artwork: %w", err)
+	}
+	return encoded.Bytes(), nil
+}
+
+func writePhotoTranscode(w http.ResponseWriter, r *http.Request) {
+	artwork, ok := photoTranscodeSource(r.URL.Query().Get("url"))
+	if !ok {
+		http.Error(w, "unknown artwork source", http.StatusNotFound)
+		return
+	}
+
+	width, err := photoTranscodeInteger(r, "width")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	height, err := photoTranscodeInteger(r, "height")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if _, err := photoTranscodeInteger(r, "minSize"); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	upscale, err := photoTranscodeBool(r, "upscale")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	crop := r.URL.Query().Get("crop")
+	if crop != "" && crop != "center" {
+		http.Error(w, "unsupported crop mode", http.StatusBadRequest)
+		return
+	}
+
+	transformed, err := resizeArtwork(artwork, width, height, crop, upscale)
+	if err != nil {
+		http.Error(w, "unable to transform artwork", http.StatusInternalServerError)
+		return
+	}
+	addCommonHeaders(w)
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Length", strconv.Itoa(len(transformed)))
+	if r.Method == http.MethodHead {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+	_, _ = w.Write(transformed)
+}
+
 func writeRoot(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
@@ -1542,6 +1694,14 @@ func main() {
 			return
 		}
 		writeArtwork(w, r)
+	})
+
+	http.HandleFunc("/photo/:/transcode", func(w http.ResponseWriter, r *http.Request) {
+		logRequest(r)
+		if handleOptions(w, r) {
+			return
+		}
+		writePhotoTranscode(w, r)
 	})
 
 	http.HandleFunc("/library/metadata/1001/related", func(w http.ResponseWriter, r *http.Request) {

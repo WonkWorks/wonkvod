@@ -884,6 +884,69 @@ func TestEveryAdvertisedArtworkPathReturnsValidImage(t *testing.T) {
 	}
 }
 
+func TestPhotoTranscodeReturnsFixtureArtwork(t *testing.T) {
+	tests := []struct {
+		name           string
+		requestURL     string
+		expectedWidth  int
+		expectedHeight int
+	}{
+		{
+			name:           "poster",
+			requestURL:     "/photo/:/transcode?url=/library/metadata/1001/thumb/1790899200&width=240&height=360",
+			expectedWidth:  240,
+			expectedHeight: 360,
+		},
+		{
+			name:           "details background",
+			requestURL:     "/photo/:/transcode?url=/library/metadata/1001/art/1790899200&width=853&minSize=0&crop=center&upscale=1&height=480",
+			expectedWidth:  853,
+			expectedHeight: 480,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, test.requestURL, nil)
+			response := httptest.NewRecorder()
+			writePhotoTranscode(response, request)
+
+			if response.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %q", response.Code, response.Body.String())
+			}
+			if got := response.Header().Get("Content-Type"); got != "image/png" {
+				t.Fatalf("Content-Type = %q", got)
+			}
+			if strings.Contains(response.Header().Get("Content-Type"), "json") || strings.Contains(response.Body.String(), "MediaContainer") {
+				t.Fatal("photo transcode returned a JSON/root response")
+			}
+			configuration, format, err := image.DecodeConfig(bytes.NewReader(response.Body.Bytes()))
+			if err != nil {
+				t.Fatalf("invalid image: %v", err)
+			}
+			if format != "png" || configuration.Width != test.expectedWidth || configuration.Height != test.expectedHeight {
+				t.Fatalf("image = %s %dx%d, want png %dx%d", format, configuration.Width, configuration.Height, test.expectedWidth, test.expectedHeight)
+			}
+			if response.Body.Len() == 0 {
+				t.Fatal("empty photo transcode response")
+			}
+		})
+	}
+}
+
+func TestPhotoTranscodeRejectsUnknownArtworkSource(t *testing.T) {
+	request := httptest.NewRequest(http.MethodGet, "/photo/:/transcode?url=/library/metadata/9999/art/1&width=853&height=480", nil)
+	response := httptest.NewRecorder()
+	writePhotoTranscode(response, request)
+
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", response.Code)
+	}
+	if strings.Contains(response.Header().Get("Content-Type"), "json") || strings.Contains(response.Body.String(), "MediaContainer") {
+		t.Fatalf("unknown transcode source fell through to root identity: %q", response.Body.String())
+	}
+}
+
 func decisionResponse(t *testing.T, accept string) *httptest.ResponseRecorder {
 	t.Helper()
 	req := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?session=session-1", nil)
