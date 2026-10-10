@@ -30,8 +30,9 @@ const (
 	libraryName = "WonkVOD Movies"
 
 	movieRatingKey = "1001"
-	movieGUID      = "plex://movie/f4a0eda242f58b0a4e24106a"
-	movieTitle     = "WonkVOD Test Movie"
+	movieGUID      = "plex://movie/61a8a0880e2b362bf841341c"
+	movieSlug      = "a-90s-christmas-2024"
+	movieTitle     = "A '90s Christmas"
 	movieAddedAt   = 1790899200
 	movieUpdatedAt = 1790899200
 	movieThumbPath = "/library/metadata/1001/thumb/1790899200"
@@ -591,7 +592,7 @@ func syntheticMovie() movie {
 		Title:                 movieTitle,
 		TitleSort:             movieTitle,
 		OriginalTitle:         movieTitle,
-		Slug:                  "wonkvod-test-movie",
+		Slug:                  movieSlug,
 		Thumb:                 movieThumbPath,
 		Art:                   movieArtPath,
 		Summary:               "A synthetic movie served entirely by WonkVOD.",

@@ -194,10 +194,16 @@ func TestRichMovieDetailShape(t *testing.T) {
 	}
 }
 
-func TestSyntheticMoviePrimaryGUIDExperimentIsIsolated(t *testing.T) {
+func TestSyntheticMoviePlexIdentityExperimentIsIsolated(t *testing.T) {
 	item := syntheticMovie()
-	if item.GUID != "plex://movie/f4a0eda242f58b0a4e24106a" {
+	if item.GUID != "plex://movie/61a8a0880e2b362bf841341c" {
 		t.Fatalf("primary guid = %q", item.GUID)
+	}
+	if item.Slug != "a-90s-christmas-2024" {
+		t.Fatalf("slug = %q", item.Slug)
+	}
+	if item.Title != "A '90s Christmas" {
+		t.Fatalf("title = %q", item.Title)
 	}
 	if item.RatingKey != "1001" || item.Key != "/library/metadata/1001" {
 		t.Errorf("protected item identity changed: ratingKey=%q key=%q", item.RatingKey, item.Key)
