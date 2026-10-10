@@ -174,6 +174,38 @@ func TestOpenRejectsRangeScopedCachedRedirectForFullRequest(t *testing.T) {
 	}
 }
 
+func TestOpenDoesNotRetryOrInvalidateWhenCurrentContextIsCanceled(t *testing.T) {
+	var attempts atomic.Int32
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		attempts.Add(1)
+		return nil, request.Context().Err()
+	})}
+	source, err := NewVODSource(client, "https://provider.test", "user", "secret", "123", "mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := "https://cached-cdn.test/file"
+	source.setResolved(cached)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	var events []OpenTrace
+	_, err = source.OpenWithTrace(ctx, http.MethodGet, "bytes=3434-", func(event OpenTrace) {
+		events = append(events, event)
+	})
+	if err == nil {
+		t.Fatal("OpenWithTrace succeeded with a canceled request context")
+	}
+	if len(events) != 1 || events[0].ErrorClass != "context_canceled" || events[0].RetryDecision != "" {
+		t.Fatalf("events=%#v", events)
+	}
+	if attempts.Load() > 1 {
+		t.Fatalf("attempts=%d, want at most 1", attempts.Load())
+	}
+	if source.getResolved() != cached {
+		t.Fatalf("cached redirect changed to %q", source.getResolved())
+	}
+}
+
 func TestSizeProbeAcceptsHTTP200ContentLengthWithoutReadingBody(t *testing.T) {
 	body := &closeTrackingBody{}
 	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {

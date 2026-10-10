@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -269,6 +273,41 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 	fallbackResponse = performRealRequest(handler, http.MethodPost, malformed, "application/json", nil)
 	if fallbackResponse.Code != http.StatusTeapot || fallbackResponse.Header().Get("X-Test-Upstream") != "true" {
 		t.Fatal("malformed TV queue did not fall through")
+	}
+}
+
+func TestCanceledPartRequestDoesNotRetryOrWrite502(t *testing.T) {
+	handler, snapshot, _ := realCatalogTestHandler(t)
+	partID := partObjectID("movie", snapshot.Movies[0].SourceID)
+	var trace bytes.Buffer
+	traced := traceRequests(handler, log.New(&trace, "", 0))
+	request := httptest.NewRequest(http.MethodGet, "/library/parts/"+strconvFormatInt(partID)+"/file.mp4", nil)
+	request.Header.Set("Range", "bytes=3434-")
+	ctx, cancel := context.WithCancel(request.Context())
+	cancel()
+	request = request.WithContext(ctx)
+	recorder := httptest.NewRecorder()
+	traced.ServeHTTP(recorder, request)
+	if recorder.Code == http.StatusBadGateway || recorder.Body.Len() != 0 {
+		t.Fatalf("canceled request status=%d body=%q", recorder.Code, recorder.Body.String())
+	}
+	if !strings.Contains(trace.String(), "status=499") {
+		t.Fatalf("trace did not classify client cancellation: %s", trace.String())
+	}
+}
+
+func TestMediaCopyTerminationOwnership(t *testing.T) {
+	if got := mediaCopyTermination(context.Background(), nil, syscall.EPIPE, syscall.EPIPE); got != "downstream_broken_pipe" {
+		t.Fatalf("broken pipe classified as %q", got)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if got := mediaCopyTermination(ctx, context.Canceled, nil, context.Canceled); got != "downstream_client_canceled" {
+		t.Fatalf("client cancellation classified as %q", got)
+	}
+	upstreamErr := errors.New("upstream read")
+	if got := mediaCopyTermination(context.Background(), upstreamErr, nil, upstreamErr); got != "upstream_read_error" {
+		t.Fatalf("upstream failure classified as %q", got)
 	}
 }
 

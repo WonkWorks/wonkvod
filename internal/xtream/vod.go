@@ -239,7 +239,9 @@ func (s *VODSource) OpenWithTrace(ctx context.Context, method, rangeHeader strin
 	if state == "cached_redirect" {
 		switch {
 		case err != nil:
-			retryDecision = "renew_canonical_transport_error"
+			if ctx.Err() == nil {
+				retryDecision = "renew_canonical_transport_error"
+			}
 		case isExpiredStatus(resp.StatusCode):
 			retryDecision = "renew_canonical_expired_status"
 		case strings.TrimSpace(rangeHeader) == "" && resp.StatusCode == http.StatusPartialContent:

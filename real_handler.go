@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"wonkvod/internal/xtream"
@@ -24,8 +25,10 @@ type realCatalogHandler struct {
 	passthrough http.Handler
 	httpClient  *http.Client
 	queueID     atomic.Int64
+	mediaID     atomic.Uint64
 	queuesMu    sync.RWMutex
 	queues      map[int64]virtualPlayQueue
+	mediaCtx    sync.Map
 }
 
 type virtualPlayQueue struct {
@@ -651,17 +654,37 @@ func (h *realCatalogHandler) servePart(w http.ResponseWriter, r *http.Request) b
 	if !ok {
 		return false
 	}
+	requestID := h.mediaID.Add(1)
+	startedAt := time.Now()
+	contextIdentity := fmt.Sprintf("%p", r.Context())
+	priorRequestID, sharedContext := h.mediaCtx.LoadOrStore(contextIdentity, requestID)
+	if !sharedContext {
+		priorRequestID = nil
+	}
+	defer h.mediaCtx.Delete(contextIdentity)
+	logMediaContext(requestID, "handler_entry", startedAt, r.Context(), contextIdentity, sharedContext, priorRequestID)
 	source, err := h.catalog.source(item)
 	if err != nil {
 		http.Error(w, "media source unavailable", http.StatusBadGateway)
 		return true
 	}
 	requestedRange := r.Header.Get("Range")
+	logMediaContext(requestID, "before_upstream_open", startedAt, r.Context(), contextIdentity, sharedContext, priorRequestID)
 	resp, err := source.OpenWithTrace(r.Context(), r.Method, requestedRange, func(event xtream.OpenTrace) {
-		log.Printf("WONKVOD_MEDIA_TRACE phase=upstream source_id=%q part_id=%d method=%q range=%q host=%q source_state=%q attempt=%d upstream_status=%d content_length=%d content_range=%q error_class=%q retry_decision=%q", item.SourceID, id, r.Method, requestedRange, event.Host, event.SourceState, event.Attempt, event.Status, event.ContentLength, event.ContentRange, event.ErrorClass, event.RetryDecision)
+		checkpoint := "after_upstream_attempt"
+		if event.RetryDecision != "" {
+			checkpoint = "before_retry"
+		}
+		log.Printf("WONKVOD_MEDIA_TRACE phase=upstream request_id=%d context_checkpoint=%q context_state=%q context_identity=%q elapsed_ms=%.3f source_id=%q part_id=%d method=%q range=%q host=%q source_state=%q attempt=%d upstream_status=%d content_length=%d content_range=%q error_class=%q retry_decision=%q", requestID, checkpoint, requestContextState(r.Context()), contextIdentity, elapsedMilliseconds(startedAt), item.SourceID, id, r.Method, requestedRange, event.Host, event.SourceState, event.Attempt, event.Status, event.ContentLength, event.ContentRange, event.ErrorClass, event.RetryDecision)
 	})
+	logMediaContext(requestID, "after_upstream_open", startedAt, r.Context(), contextIdentity, sharedContext, priorRequestID)
 	if err != nil {
-		log.Printf("WONKVOD_MEDIA_TRACE phase=downstream source_id=%q part_id=%d method=%q range=%q status=%d bytes=0 copy_error=%q", item.SourceID, id, r.Method, requestedRange, http.StatusBadGateway, "upstream_open")
+		if r.Context().Err() != nil {
+			markTraceClientCanceled(w)
+			log.Printf("WONKVOD_MEDIA_TRACE phase=downstream request_id=%d context_state=%q elapsed_ms=%.3f source_id=%q part_id=%d method=%q range=%q status=0 bytes=0 termination=%q", requestID, requestContextState(r.Context()), elapsedMilliseconds(startedAt), item.SourceID, id, r.Method, requestedRange, "current_request_canceled")
+			return true
+		}
+		log.Printf("WONKVOD_MEDIA_TRACE phase=downstream request_id=%d context_state=%q elapsed_ms=%.3f source_id=%q part_id=%d method=%q range=%q status=%d bytes=0 termination=%q", requestID, requestContextState(r.Context()), elapsedMilliseconds(startedAt), item.SourceID, id, r.Method, requestedRange, http.StatusBadGateway, "upstream_open_error")
 		http.Error(w, "media source unavailable", http.StatusBadGateway)
 		return true
 	}
@@ -679,10 +702,14 @@ func (h *realCatalogHandler) servePart(w http.ResponseWriter, r *http.Request) b
 	w.WriteHeader(downstreamStatus)
 	var copied int64
 	var copyErr error
+	var readTracker mediaReadTracker
+	var writeTracker mediaWriteTracker
 	if r.Method != http.MethodHead {
-		copied, copyErr = io.Copy(w, resp.Body)
+		readTracker.reader = resp.Body
+		writeTracker.writer = w
+		copied, copyErr = io.Copy(&writeTracker, &readTracker)
 	}
-	log.Printf("WONKVOD_MEDIA_TRACE phase=downstream source_id=%q part_id=%d method=%q range=%q status=%d bytes=%d copy_error=%q", item.SourceID, id, r.Method, requestedRange, downstreamStatus, copied, mediaCopyErrorClass(copyErr))
+	log.Printf("WONKVOD_MEDIA_TRACE phase=downstream request_id=%d context_state=%q elapsed_ms=%.3f source_id=%q part_id=%d method=%q range=%q status=%d bytes=%d termination=%q", requestID, requestContextState(r.Context()), elapsedMilliseconds(startedAt), item.SourceID, id, r.Method, requestedRange, downstreamStatus, copied, mediaCopyTermination(r.Context(), readTracker.err, writeTracker.err, copyErr))
 	return true
 }
 
@@ -702,17 +729,79 @@ func (h *realCatalogHandler) acknowledgePart(w http.ResponseWriter, r *http.Requ
 	return true
 }
 
-func mediaCopyErrorClass(err error) string {
-	if err == nil {
+type mediaReadTracker struct {
+	reader io.Reader
+	err    error
+}
+
+func (tracker *mediaReadTracker) Read(buffer []byte) (int, error) {
+	count, err := tracker.reader.Read(buffer)
+	if err != nil && !errors.Is(err, io.EOF) {
+		tracker.err = err
+	}
+	return count, err
+}
+
+type mediaWriteTracker struct {
+	writer io.Writer
+	err    error
+}
+
+func (tracker *mediaWriteTracker) Write(buffer []byte) (int, error) {
+	count, err := tracker.writer.Write(buffer)
+	if err != nil {
+		tracker.err = err
+	}
+	return count, err
+}
+
+func mediaCopyTermination(ctx context.Context, readErr, writeErr, copyErr error) string {
+	if copyErr == nil {
 		return ""
 	}
-	if errors.Is(err, context.Canceled) {
-		return "context_canceled"
+	if errors.Is(writeErr, syscall.EPIPE) {
+		return "downstream_broken_pipe"
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(writeErr, syscall.ECONNRESET) {
+		return "downstream_connection_reset"
+	}
+	if writeErr != nil {
+		return "downstream_write_error"
+	}
+	if ctx.Err() != nil {
+		return "downstream_client_canceled"
+	}
+	if readErr != nil {
+		return "upstream_read_error"
+	}
+	return "server_copy_error"
+}
+
+func requestContextState(ctx context.Context) string {
+	switch ctx.Err() {
+	case nil:
+		return "live"
+	case context.Canceled:
+		return "canceled"
+	case context.DeadlineExceeded:
 		return "deadline_exceeded"
+	default:
+		return "error"
 	}
-	return "stream_copy_error"
+}
+
+func elapsedMilliseconds(startedAt time.Time) float64 {
+	return float64(time.Since(startedAt).Microseconds()) / 1000
+}
+
+func logMediaContext(requestID uint64, checkpoint string, startedAt time.Time, ctx context.Context, identity string, shared bool, prior any) {
+	log.Printf("WONKVOD_MEDIA_TRACE phase=context request_id=%d context_checkpoint=%q context_state=%q context_identity=%q context_shared=%t prior_request_id=%v elapsed_ms=%.3f", requestID, checkpoint, requestContextState(ctx), identity, shared, prior, elapsedMilliseconds(startedAt))
+}
+
+func markTraceClientCanceled(w http.ResponseWriter) {
+	if writer, ok := w.(*traceResponseWriter); ok && writer.statusCode == 0 {
+		writer.statusCode = 499
+	}
 }
 
 func (h *realCatalogHandler) artworkURL(metadataPath string) (string, bool) {
