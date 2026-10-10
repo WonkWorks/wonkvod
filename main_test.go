@@ -691,6 +691,7 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 		"/hubs/promoted?includeMeta=1",
 		"/hubs/continueWatching?includeDetails=1",
 		"/hubs/sections/1?includeCollections=1",
+		"/hubs/sections/2?includeCollections=1",
 		"/library/sections",
 		"/library/sections/1/firstCharacter?sort=titleSort",
 		"/library/sections/1/all?type=1",
@@ -742,7 +743,7 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 			t.Errorf("Stage 4 advertised unsupported provider feature %q", unsupported)
 		}
 	}
-	directories := requireArray(t, content["Directory"], "content.Directory", 2)
+	directories := requireArray(t, content["Directory"], "content.Directory", 3)
 	sectionDirectory := requireObject(t, directories[1], "content.Directory[1]")
 	if sectionDirectory["id"] != "1" || sectionDirectory["key"] != "/library/sections/1" ||
 		sectionDirectory["hubKey"] != "/hubs/sections/1" || sectionDirectory["uuid"] != libraryUUID ||
@@ -752,7 +753,7 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 	preferences := requireObject(t, sectionDirectory["Preferences"], "section Preferences")
 	_ = requireArray(t, preferences["Setting"], "section Preferences.Setting", 3)
 
-	for _, target := range []string{"/hubs", "/hubs/promoted", "/hubs/sections/1"} {
+	for _, target := range []string{"/hubs", "/hubs/promoted", "/hubs/sections/1", "/hubs/sections/2"} {
 		response, _ := request(http.MethodGet, target, "application/json", nil)
 		container := responseContainerObject(t, response)
 		hubs, ok := container["Hub"].([]any)
@@ -767,6 +768,13 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 			}
 			metadata := requireArray(t, metadataValue, "Hub.Metadata", 1)
 			item := requireObject(t, metadata[0], "Hub.Metadata[0]")
+			if item["type"] == "show" {
+				if item["ratingKey"] != tvShowRatingKey || item["key"] != "/library/metadata/"+tvShowRatingKey+"/children" ||
+					hub["hubKey"] != "/library/metadata/"+tvShowRatingKey {
+					t.Errorf("Stage 4 hub TV identity for %s = item %#v hub %#v", target, item, hub)
+				}
+				continue
+			}
 			if item["ratingKey"] != "1" || item["key"] != "/library/metadata/1" ||
 				item["thumb"] != sacrificialMovieThumb || item["art"] != sacrificialMovieArt {
 				t.Errorf("Stage 4 hub movie identity for %s = %#v", target, item)
@@ -797,7 +805,6 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 		{http.MethodGet, "/activities"},
 		{http.MethodGet, "/:/websockets/notifications"},
 		{http.MethodGet, "/hubs/home/recentlyAdded"},
-		{http.MethodGet, "/hubs/sections/2"},
 		{http.MethodPost, "/media/providers"},
 	} {
 		response, trace := request(control.method, control.path, "application/json", nil)

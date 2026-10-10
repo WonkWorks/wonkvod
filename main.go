@@ -664,7 +664,6 @@ func pmsPassthroughLibraryHandler(upstream, mediaPath string) (http.Handler, err
 		"/library/sections/1/director":   true,
 		"/library/sections/1/actor":      true,
 	}
-
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			metadata.ServeHTTP(w, r)
@@ -699,6 +698,9 @@ func pmsPassthroughPresentationHandler(upstream, mediaPath string) (http.Handler
 	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if serveTVPresentationRoute(w, r, mediaPath) {
+			return
+		}
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
 			library.ServeHTTP(w, r)
 			return
@@ -715,6 +717,8 @@ func pmsPassthroughPresentationHandler(upstream, mediaPath string) (http.Handler
 			writeSacrificialContinueWatchingHub(w)
 		case "/hubs/sections/1":
 			writeSacrificialMovieHub(w)
+		case "/hubs/sections/2":
+			writeTVSectionHubs(w)
 		default:
 			library.ServeHTTP(w, r)
 		}
@@ -1533,6 +1537,7 @@ func sacrificialMediaProvidersDocument(includePreferences bool) map[string]any {
 							"Directory": []any{
 								map[string]any{"hubKey": "/hubs", "title": "Home"},
 								sacrificialLibraryDirectory(includePreferences),
+								tvLibraryDirectory(includePreferences),
 							},
 						},
 						map[string]any{"key": "/library/metadata", "type": "metadata"},
@@ -2035,6 +2040,9 @@ func writeSacrificialHomeHubs(w http.ResponseWriter, r *http.Request) {
 	if includeAll || requestedIdentifiers["home.movies.recent"] {
 		hubs = append(hubs, sacrificialRecentlyAddedMovieHub(true))
 	}
+	if includeAll || requestedIdentifiers["home.television.recent"] {
+		hubs = append(hubs, tvRecentlyAddedHub(true))
+	}
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
 			"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs,
@@ -2043,7 +2051,7 @@ func writeSacrificialHomeHubs(w http.ResponseWriter, r *http.Request) {
 }
 
 func writeSacrificialPromotedHubs(w http.ResponseWriter) {
-	hubs := []any{homeContinueHub(), homeOnDeckHub(), sacrificialRecentlyAddedMovieHub(false)}
+	hubs := []any{homeContinueHub(), homeOnDeckHub(), sacrificialRecentlyAddedMovieHub(false), tvRecentlyAddedHub(false)}
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
 			"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs,
