@@ -51,7 +51,8 @@ const (
 	movieSize     = 209970
 	movieBitrate  = 336
 
-	defaultPMSUpstream = "http://plex-identity:32400"
+	defaultPMSUpstream  = "http://plex-identity:32400"
+	sacrificialPartPath = "/library/parts/1/1790908037/file.mp4"
 )
 
 type plexBool bool
@@ -598,6 +599,22 @@ func pmsPassthroughHandler(upstream string) (http.Handler, error) {
 	}), nil
 }
 
+func pmsPassthroughMediaHandler(upstream, mediaPath string) (http.Handler, error) {
+	passthrough, err := pmsPassthroughHandler(upstream)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == sacrificialPartPath && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			addCommonHeaders(w)
+			http.ServeFile(w, r, mediaPath)
+			return
+		}
+		passthrough.ServeHTTP(w, r)
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -607,6 +624,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughHandler(upstream)
+	case "passthrough-media":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughMediaHandler(upstream, testFile)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}

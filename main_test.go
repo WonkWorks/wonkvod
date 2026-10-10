@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"reflect"
 	"regexp"
 	"strings"
@@ -217,6 +218,94 @@ func TestPMSPassthroughKeepsIdentityHealthcheckFunctional(t *testing.T) {
 	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/identity", nil))
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
 		t.Fatalf("passthrough health response = status %d body %q", response.Code, response.Body.String())
+	}
+}
+
+func TestPMSPassthroughMediaOwnsOnlyExactPartBytes(t *testing.T) {
+	mediaBytes := bytes.Repeat([]byte("wonkvod-media-"), 300)
+	mediaPath := t.TempDir() + "/test2.mp4"
+	if err := os.WriteFile(mediaPath, mediaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"source":"upstream","method":%q,"path":%q}`, r.Method, r.URL.Path)
+	}))
+	defer upstream.Close()
+
+	handler, err := pmsPassthroughMediaHandler(upstream.URL, mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := func(method, target string, configure func(*http.Request)) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		var traceOutput bytes.Buffer
+		traced := traceRequests(handler, log.New(&traceOutput, "", 0))
+		req := httptest.NewRequest(method, target, nil)
+		if configure != nil {
+			configure(req)
+		}
+		response := httptest.NewRecorder()
+		traced.ServeHTTP(response, req)
+		return response, traceOutput.String()
+	}
+
+	control, controlTrace := request(http.MethodGet, "/identity", nil)
+	if control.Code != http.StatusOK || !strings.Contains(control.Body.String(), `"source":"upstream"`) ||
+		!strings.Contains(controlTrace, `source="plex-identity"`) {
+		t.Fatalf("control route was not proxied: status=%d body=%q trace=%s", control.Code, control.Body.String(), controlTrace)
+	}
+
+	nonmatching, nonmatchingTrace := request(http.MethodGet, "/library/parts/99/other/file.mp4", nil)
+	if nonmatching.Code != http.StatusOK || !strings.Contains(nonmatching.Body.String(), `"source":"upstream"`) ||
+		!strings.Contains(nonmatchingTrace, `source="plex-identity"`) {
+		t.Fatalf("nonmatching Part was not proxied: status=%d body=%q trace=%s", nonmatching.Code, nonmatching.Body.String(), nonmatchingTrace)
+	}
+
+	const fakeToken = "passthrough-media-fake-secret"
+	ranged, rangeTrace := request(http.MethodGet, sacrificialPartPath+"?X-Plex-Token="+fakeToken, func(req *http.Request) {
+		req.Header.Set("Range", "bytes=100-199")
+	})
+	if ranged.Code != http.StatusPartialContent || ranged.Header().Get("Content-Range") != fmt.Sprintf("bytes 100-199/%d", len(mediaBytes)) ||
+		ranged.Header().Get("Content-Length") != "100" || ranged.Header().Get("Accept-Ranges") != "bytes" ||
+		ranged.Header().Get("Content-Type") != "video/mp4" || !bytes.Equal(ranged.Body.Bytes(), mediaBytes[100:200]) {
+		t.Errorf("intercepted Range response = status %d headers %#v bytes %d", ranged.Code, ranged.Header(), ranged.Body.Len())
+	}
+	if !strings.Contains(rangeTrace, `source="wonkvod"`) || strings.Contains(rangeTrace, fakeToken) ||
+		!strings.Contains(rangeTrace, "[REDACTED]") {
+		t.Errorf("intercepted media trace source/redaction = %s", rangeTrace)
+	}
+
+	head, headTrace := request(http.MethodHead, sacrificialPartPath, nil)
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != fmt.Sprint(len(mediaBytes)) ||
+		head.Header().Get("Content-Type") != "video/mp4" || !strings.Contains(headTrace, `source="wonkvod"`) {
+		t.Errorf("intercepted HEAD response = status %d headers %#v bytes %d trace=%s", head.Code, head.Header(), head.Body.Len(), headTrace)
+	}
+
+	full, fullTrace := request(http.MethodGet, sacrificialPartPath, nil)
+	if full.Code != http.StatusOK || !bytes.Equal(full.Body.Bytes(), mediaBytes) || !strings.Contains(fullTrace, `source="wonkvod"`) {
+		t.Errorf("intercepted full response = status %d bytes %d trace=%s", full.Code, full.Body.Len(), fullTrace)
+	}
+}
+
+func TestPMSPassthroughMediaKeepsIdentityHealthcheckProxied(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/identity" {
+			t.Fatalf("healthcheck path = %q", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"machineIdentifier":"` + machineID + `"}}`))
+	}))
+	defer upstream.Close()
+	handler, err := handlerForPMSMode("passthrough-media", upstream.URL, http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/identity", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
+		t.Fatalf("passthrough-media health response = status %d body %q", response.Code, response.Body.String())
 	}
 }
 
