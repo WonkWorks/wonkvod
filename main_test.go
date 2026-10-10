@@ -709,10 +709,13 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 	features := requireArray(t, provider["Feature"], "Feature", 5)
 	promotedCount := 0
 	featureTypes := map[string]bool{}
+	featureOrder := make([]string, 0, len(features))
 	var content map[string]any
+	var timeline map[string]any
 	for _, value := range features {
 		feature := requireObject(t, value, "Feature")
 		featureType, _ := feature["type"].(string)
+		featureOrder = append(featureOrder, featureType)
 		featureTypes[featureType] = true
 		if featureType == "promoted" {
 			promotedCount++
@@ -720,6 +723,16 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 		if featureType == "content" {
 			content = feature
 		}
+		if featureType == "timeline" {
+			timeline = feature
+		}
+	}
+	if want := []string{"content", "metadata", "promoted", "playqueue", "timeline"}; !reflect.DeepEqual(featureOrder, want) {
+		t.Errorf("Stage 4 provider feature order = %v, want %v", featureOrder, want)
+	}
+	if timeline["key"] != "/:/timeline" || timeline["type"] != "timeline" ||
+		timeline["scrobbleKey"] != "/:/scrobble" || timeline["unscrobbleKey"] != "/:/unscrobble" || len(timeline) != 4 {
+		t.Errorf("Stage 4 timeline feature = %#v", timeline)
 	}
 	if promotedCount != 1 {
 		t.Errorf("Stage 4 promoted feature count = %d", promotedCount)
@@ -778,6 +791,8 @@ func TestPMSPassthroughPresentationOwnsProviderHubsLibraryMetadataAndPart(t *tes
 		{http.MethodGet, "/video/:/transcode/universal/decision"},
 		{http.MethodPut, sacrificialPartPath},
 		{http.MethodGet, "/:/timeline"},
+		{http.MethodGet, "/:/scrobble"},
+		{http.MethodGet, "/:/unscrobble"},
 		{http.MethodGet, "/status/sessions"},
 		{http.MethodGet, "/activities"},
 		{http.MethodGet, "/:/websockets/notifications"},

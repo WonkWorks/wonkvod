@@ -1538,7 +1538,12 @@ func sacrificialMediaProvidersDocument(includePreferences bool) map[string]any {
 						map[string]any{"key": "/library/metadata", "type": "metadata"},
 						map[string]any{"key": "/hubs/promoted", "type": "promoted"},
 						map[string]any{"flavor": "universal", "key": "/playQueues", "type": "playqueue"},
-						map[string]any{"key": "/:/timeline", "type": "timeline"},
+						map[string]any{
+							"key":           "/:/timeline",
+							"type":          "timeline",
+							"scrobbleKey":   "/:/scrobble",
+							"unscrobbleKey": "/:/unscrobble",
+						},
 					},
 				},
 			},

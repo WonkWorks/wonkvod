@@ -218,7 +218,9 @@ func providerVariantDocument(variant string, includePreferences bool) (map[strin
 		return nil, err
 	}
 	if variant == providerVariantWonkVOD {
-		return sacrificialMediaProvidersDocument(includePreferences), nil
+		wonkDocument := sacrificialMediaProvidersDocument(includePreferences)
+		removeProviderTimelineKeys(primaryProvider(providerContainer(wonkDocument)))
+		return wonkDocument, nil
 	}
 
 	wonk := sacrificialMediaProvidersDocument(includePreferences)
@@ -258,6 +260,7 @@ func providerVariantDocument(variant string, includePreferences bool) (map[strin
 				features[index] = realContent
 			}
 		}
+		removeProviderTimelineKeys(wonkProvider)
 		realProvider["Feature"] = mapsToAny(features)
 	case providerVariantServerCapabilities:
 		friendlyName := realContainer["friendlyName"]
@@ -276,6 +279,14 @@ func providerVariantDocument(variant string, includePreferences bool) (map[strin
 		return nil, fmt.Errorf("unsupported provider variant %q", variant)
 	}
 	return document, nil
+}
+
+// Keep the previously tested crashing provider variants frozen after the
+// normal WonkVOD provider gains the complete timeline contract.
+func removeProviderTimelineKeys(provider map[string]any) {
+	timeline := providerFeature(provider, "timeline")
+	delete(timeline, "scrobbleKey")
+	delete(timeline, "unscrobbleKey")
 }
 
 func providerContainer(document map[string]any) map[string]any {

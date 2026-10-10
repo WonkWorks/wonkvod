@@ -151,15 +151,41 @@ func TestProviderBisectVariantsChangeOnlyTheirDeclaredGroup(t *testing.T) {
 	}
 }
 
-func TestProviderBisectFullWonkVODMatchesCurrentCrashingSerializer(t *testing.T) {
+func TestProviderBisectFullWonkVODPreservesFrozenCrashingSerializer(t *testing.T) {
 	for _, includePreferences := range []bool{false, true} {
 		got, err := providerVariantDocument(providerVariantWonkVOD, includePreferences)
 		if err != nil {
 			t.Fatal(err)
 		}
 		want := sacrificialMediaProvidersDocument(includePreferences)
+		removeProviderTimelineKeys(primaryProvider(providerContainer(want)))
 		if !reflect.DeepEqual(got, want) {
-			t.Fatal("full WonkVOD variant drifted from the Stage 4A provider serializer")
+			t.Fatal("full WonkVOD diagnostic variant drifted from its frozen crashing serializer")
+		}
+	}
+}
+
+func TestNormalProviderAddsOnlyRequiredTimelineKeysToFrozenWonkVOD(t *testing.T) {
+	for _, includePreferences := range []bool{false, true} {
+		normal := sacrificialMediaProvidersDocument(includePreferences)
+		frozen, err := providerVariantDocument(providerVariantWonkVOD, includePreferences)
+		if err != nil {
+			t.Fatal(err)
+		}
+		normalProvider := primaryProvider(providerContainer(normal))
+		features := normalProvider["Feature"].([]any)
+		if got := providerFeatureTypes(features); !reflect.DeepEqual(got, []string{"content", "metadata", "promoted", "playqueue", "timeline"}) {
+			t.Fatalf("normal provider feature order = %v", got)
+		}
+		timeline := providerFeature(normalProvider, "timeline")
+		if timeline["key"] != "/:/timeline" || timeline["type"] != "timeline" ||
+			timeline["scrobbleKey"] != "/:/scrobble" || timeline["unscrobbleKey"] != "/:/unscrobble" || len(timeline) != 4 {
+			t.Fatalf("normal provider timeline = %#v", timeline)
+		}
+		delete(timeline, "scrobbleKey")
+		delete(timeline, "unscrobbleKey")
+		if !reflect.DeepEqual(normal, frozen) {
+			t.Fatal("normal provider changed beyond the two required timeline keys")
 		}
 	}
 }
