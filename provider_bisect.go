@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -19,6 +20,7 @@ const (
 	providerVariantPreferences        = "preferences"
 	providerVariantTypesProtocols     = "types-protocols"
 	providerVariantFeatures           = "features"
+	providerVariantFeaturesBisect     = "features-bisect"
 	providerVariantServerCapabilities = "server-capabilities"
 	providerVariantWonkVOD            = "wonkvod"
 )
@@ -30,8 +32,29 @@ var providerVariants = map[string]bool{
 	providerVariantPreferences:        true,
 	providerVariantTypesProtocols:     true,
 	providerVariantFeatures:           true,
+	providerVariantFeaturesBisect:     true,
 	providerVariantServerCapabilities: true,
 	providerVariantWonkVOD:            true,
+}
+
+const (
+	providerFeatureVariantReal           = "real"
+	providerFeatureVariantTimelineKeys   = "timeline-keys"
+	providerFeatureVariantDiscovery      = "discovery"
+	providerFeatureVariantPresentation   = "presentation"
+	providerFeatureVariantLibraryActions = "library-actions"
+	providerFeatureVariantSubscribe      = "subscribe"
+	providerFeatureVariantWonkVOD        = "wonkvod"
+)
+
+var providerFeatureVariants = map[string]bool{
+	providerFeatureVariantReal:           true,
+	providerFeatureVariantTimelineKeys:   true,
+	providerFeatureVariantDiscovery:      true,
+	providerFeatureVariantPresentation:   true,
+	providerFeatureVariantLibraryActions: true,
+	providerFeatureVariantSubscribe:      true,
+	providerFeatureVariantWonkVOD:        true,
 }
 
 // These token-free fixtures were captured directly from the sacrificial PMS
@@ -50,7 +73,8 @@ var realProvidersXML []byte
 var realProvidersPreferencesXML []byte
 
 type providerBisect struct {
-	variant string
+	variant        string
+	featureVariant string
 }
 
 func newProviderBisect(variant string) (http.Handler, error) {
@@ -61,7 +85,14 @@ func newProviderBisect(variant string) (http.Handler, error) {
 	if !providerVariants[variant] {
 		return nil, fmt.Errorf("unsupported WONKVOD_PROVIDER_VARIANT %q", variant)
 	}
-	return providerBisect{variant: variant}, nil
+	featureVariant := strings.ToLower(strings.TrimSpace(os.Getenv("WONKVOD_PROVIDER_FEATURE_VARIANT")))
+	if featureVariant == "" {
+		featureVariant = providerFeatureVariantReal
+	}
+	if variant == providerVariantFeaturesBisect && !providerFeatureVariants[featureVariant] {
+		return nil, fmt.Errorf("unsupported WONKVOD_PROVIDER_FEATURE_VARIANT %q", featureVariant)
+	}
+	return providerBisect{variant: variant, featureVariant: featureVariant}, nil
 }
 
 func (handler providerBisect) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -72,7 +103,13 @@ func (handler providerBisect) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	document, err := providerVariantDocument(handler.variant, includePreferences)
+	var document map[string]any
+	var err error
+	if handler.variant == providerVariantFeaturesBisect {
+		document, err = providerFeatureVariantDocument(handler.featureVariant, includePreferences)
+	} else {
+		document, err = providerVariantDocument(handler.variant, includePreferences)
+	}
 	if err != nil {
 		http.Error(w, "provider fixture unavailable", http.StatusInternalServerError)
 		return
@@ -82,6 +119,57 @@ func (handler providerBisect) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeProviderDocumentXML(w, document)
+}
+
+func providerFeatureVariantDocument(variant string, includePreferences bool) (map[string]any, error) {
+	realBody, _ := realProviderFixture(includePreferences, true)
+	document, err := decodeProviderDocument(realBody)
+	if err != nil {
+		return nil, err
+	}
+	provider := primaryProvider(providerContainer(document))
+
+	switch variant {
+	case providerFeatureVariantReal:
+		return document, nil
+	case providerFeatureVariantTimelineKeys:
+		timeline := providerFeature(provider, "timeline")
+		delete(timeline, "scrobbleKey")
+		delete(timeline, "unscrobbleKey")
+	case providerFeatureVariantDiscovery:
+		removeProviderFeatures(provider, "search", "universalsearch", "queryParser")
+	case providerFeatureVariantPresentation:
+		removeProviderFeatures(provider, "imagetranscoder", "continuewatching")
+	case providerFeatureVariantLibraryActions:
+		removeProviderFeatures(provider, "match", "rate", "actions", "playlist", "collection", "manage")
+	case providerFeatureVariantSubscribe:
+		removeProviderFeatures(provider, "subscribe")
+	case providerFeatureVariantWonkVOD:
+		wonkDocument, variantErr := providerVariantDocument(providerVariantFeatures, includePreferences)
+		if variantErr != nil {
+			return nil, variantErr
+		}
+		provider["Feature"] = primaryProvider(providerContainer(wonkDocument))["Feature"]
+	default:
+		return nil, fmt.Errorf("unsupported provider feature variant %q", variant)
+	}
+	return document, nil
+}
+
+func removeProviderFeatures(provider map[string]any, featureTypes ...string) {
+	remove := make(map[string]bool, len(featureTypes))
+	for _, featureType := range featureTypes {
+		remove[featureType] = true
+	}
+	features := provider["Feature"].([]any)
+	retained := make([]any, 0, len(features))
+	for _, value := range features {
+		feature := value.(map[string]any)
+		if !remove[feature["type"].(string)] {
+			retained = append(retained, feature)
+		}
+	}
+	provider["Feature"] = retained
 }
 
 func realProviderFixture(includePreferences, jsonResponse bool) ([]byte, string) {
