@@ -339,8 +339,8 @@ func TestRealPMSPresentationMetadataAlignment(t *testing.T) {
 }
 
 func TestLibraryUUIDIsStableAndConsistentAcrossResponses(t *testing.T) {
-	const oldLibraryUUID = "wonkplex-test-movies-0001"
-	const expectedLibraryUUID = "8212ee84-76af-4cf3-8ec3-58b81b52ce9f"
+	const oldLibraryUUID = "8212ee84-76af-4cf3-8ec3-58b81b52ce9f"
+	const expectedLibraryUUID = "10d9d706-97da-4e34-b740-55f0ef3e309c"
 	if libraryUUID != expectedLibraryUUID {
 		t.Fatalf("libraryUUID = %q, want stable fixture UUID %q", libraryUUID, expectedLibraryUUID)
 	}
