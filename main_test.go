@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"encoding/xml"
+	"fmt"
 	"image"
 	"log"
 	"net/http"
@@ -234,22 +235,30 @@ func TestRichMovieDetailShape(t *testing.T) {
 			if item.UltraBlurColors == nil || len(item.Images) != 2 {
 				t.Errorf("presentation objects = colors:%#v images:%#v", item.UltraBlurColors, item.Images)
 			}
-			if len(item.Guids) != 1 || item.Guids[0].ID != "tmdb://601860" {
+			wantGuids := []plexGuid{{ID: "imdb://tt16270280"}, {ID: "tmdb://1361210"}, {ID: "tvdb://360893"}}
+			if !reflect.DeepEqual(item.Guids, wantGuids) {
 				t.Errorf("Guid = %#v", item.Guids)
 			}
-			if len(item.Ratings) != 1 || item.Ratings[0].Type != "audience" || item.Ratings[0].Value != 8.0 {
+			wantRatings := []plexRating{
+				{Image: "imdb://image.rating", Type: "audience", Value: 6.1},
+				{Image: "themoviedb://image.rating", Type: "audience", Value: 6.4},
+			}
+			if !reflect.DeepEqual(item.Ratings, wantRatings) {
 				t.Errorf("Rating = %#v", item.Ratings)
 			}
-			if item.AudienceRatingImage != "themoviedb://image.rating" {
+			if item.AudienceRating != 6.1 || item.AudienceRatingImage != "imdb://image.rating" {
 				t.Errorf("audienceRatingImage = %q", item.AudienceRatingImage)
 			}
-			if item.Year != 0 || item.OriginallyAvailableAt != "" || item.ContentRating != "" || item.Rating != 0 {
-				t.Errorf("real-PMS-absent detail fields were populated: %#v", item)
+			if item.TitleSort != "'90s Christmas" || item.Studio != "Vortex Productions" || item.Tagline != "Rewind to the one that got away" {
+				t.Errorf("real-PMS presentation scalars differ: %#v", item)
+			}
+			if item.Year != 2024 || item.OriginallyAvailableAt != "2024-11-01" || item.ContentRating != "TV-G" || item.Rating != 0 {
+				t.Errorf("real-PMS date/rating fields differ: %#v", item)
 			}
 			if item.LibrarySectionID != 1 || item.LibrarySectionKey != "/library/sections/1" || item.LibrarySectionTitle != libraryName {
 				t.Errorf("library section metadata = (%d, %q, %q)", item.LibrarySectionID, item.LibrarySectionKey, item.LibrarySectionTitle)
 			}
-			if item.LibrarySectionUUID != "" || item.OriginalTitle != "" || item.TitleSort != "" {
+			if item.LibrarySectionUUID != "" || item.OriginalTitle != "" {
 				t.Errorf("real-PMS-absent detail identity fields were populated: %#v", item)
 			}
 			if item.Extras == nil || item.Extras.Size != 0 {
@@ -277,8 +286,17 @@ func TestSyntheticMoviePlexIdentityExperimentIsIsolated(t *testing.T) {
 	if item.LibrarySectionID != 1 || item.LibrarySectionUUID != libraryUUID {
 		t.Errorf("protected library identity changed: id=%d uuid=%q", item.LibrarySectionID, item.LibrarySectionUUID)
 	}
-	if len(item.Guids) != 1 || item.Guids[0].ID != "tmdb://601860" {
-		t.Errorf("external Guid array changed: %#v", item.Guids)
+	wantGuids := []plexGuid{{ID: "imdb://tt16270280"}, {ID: "tmdb://1361210"}, {ID: "tvdb://360893"}}
+	if !reflect.DeepEqual(item.Guids, wantGuids) {
+		t.Errorf("external Guid array = %#v, want %#v", item.Guids, wantGuids)
+	}
+	for _, guid := range item.Guids {
+		if guid.ID == "tmdb://601860" {
+			t.Error("stale synthetic external Guid remains")
+		}
+	}
+	if item.Summary != "Workaholic lawyer Lucy Miller is celebrating her promotion alone on Christmas Eve when a mysterious rideshare experience transports her back to 1999. Reliving the holiday with her mom, sister and best friend - not to mention her high school crush - Lucy gets a second chance to understand where her relationships went wrong. Will this magical journey help her rewrite her future or leave her destined to be alone?" {
+		t.Errorf("summary = %q", item.Summary)
 	}
 	core := coreSemantics(t, mediaContainer{Metadata: []movie{item}})
 	if core.Media.ID != 2001 || core.Part.ID != 3001 || core.Video.ID != 4001 || core.Audio.ID != 4002 {
@@ -286,6 +304,37 @@ func TestSyntheticMoviePlexIdentityExperimentIsIsolated(t *testing.T) {
 	}
 	if core.Part.File != "/virtual/WonkPlex-Test-Movie.mp4" {
 		t.Errorf("virtual Part path changed: %q", core.Part.File)
+	}
+}
+
+func TestRealPMSPresentationMetadataAlignment(t *testing.T) {
+	item := syntheticMovieDetail(true, true)
+	if item.Title != "A '90s Christmas" || item.TitleSort != "'90s Christmas" || item.Slug != "a-90s-christmas-2024" || item.GUID != "plex://movie/61a8a0880e2b362bf841341c" {
+		t.Errorf("primary presentation identity differs: %#v", item)
+	}
+	if item.Studio != "Vortex Productions" || item.Tagline != "Rewind to the one that got away" || item.Year != 2024 || item.OriginallyAvailableAt != "2024-11-01" || item.ContentRating != "TV-G" {
+		t.Errorf("portable presentation fields differ: %#v", item)
+	}
+	if item.AudienceRating != 6.1 || item.AudienceRatingImage != "imdb://image.rating" {
+		t.Errorf("audience rating differs: value=%v image=%q", item.AudienceRating, item.AudienceRatingImage)
+	}
+	wantGuids := []plexGuid{{ID: "imdb://tt16270280"}, {ID: "tmdb://1361210"}, {ID: "tvdb://360893"}}
+	if !reflect.DeepEqual(item.Guids, wantGuids) {
+		t.Errorf("Guid = %#v, want %#v", item.Guids, wantGuids)
+	}
+	wantRatings := []plexRating{
+		{Image: "imdb://image.rating", Type: "audience", Value: 6.1},
+		{Image: "themoviedb://image.rating", Type: "audience", Value: 6.4},
+	}
+	if !reflect.DeepEqual(item.Ratings, wantRatings) {
+		t.Errorf("Rating = %#v, want %#v", item.Ratings, wantRatings)
+	}
+	wantColors := &ultraBlurColors{TopLeft: "332254", TopRight: "3b51ba", BottomRight: "8c4924", BottomLeft: "af1115"}
+	if !reflect.DeepEqual(item.UltraBlurColors, wantColors) {
+		t.Errorf("UltraBlurColors = %#v, want %#v", item.UltraBlurColors, wantColors)
+	}
+	if len(item.Images) != 2 || item.Images[0].URL != movieThumbPath || item.Images[1].URL != movieArtPath {
+		t.Errorf("local artwork descriptors changed: %#v", item.Images)
 	}
 }
 
@@ -434,16 +483,22 @@ func TestStrictRealPMSJSONShapes(t *testing.T) {
 		item := requireObject(t, items[0], "MediaContainer.Metadata[0]")
 		assertObjectShape(t, item, "MediaContainer.Metadata[0]", map[string]string{
 			"ratingKey": "string", "key": "string", "guid": "string", "type": "string", "title": "string", "slug": "string",
-			"thumb": "string", "art": "string", "summary": "string", "duration": "integer", "addedAt": "integer",
+			"titleSort": "string", "thumb": "string", "art": "string", "studio": "string", "summary": "string",
+			"tagline": "string", "year": "integer", "duration": "integer", "addedAt": "integer",
 			"updatedAt": "integer", "librarySectionID": "integer", "librarySectionKey": "string",
-			"librarySectionTitle": "string", "audienceRating": "decimal", "audienceRatingImage": "string",
+			"librarySectionTitle": "string", "contentRating": "string", "audienceRating": "decimal",
+			"audienceRatingImage": "string", "originallyAvailableAt": "string",
 			"Media": "array", "Image": "array", "UltraBlurColors": "object", "Guid": "array", "Rating": "array", "Extras": "object",
 		})
 		assertCommonPresentationShape(t, item, true)
-		guid := requireObject(t, requireArray(t, item["Guid"], "Metadata[0].Guid", 1)[0], "Metadata[0].Guid[0]")
-		assertObjectShape(t, guid, "Metadata[0].Guid[0]", map[string]string{"id": "string"})
-		rating := requireObject(t, requireArray(t, item["Rating"], "Metadata[0].Rating", 1)[0], "Metadata[0].Rating[0]")
-		assertObjectShape(t, rating, "Metadata[0].Rating[0]", map[string]string{"image": "string", "type": "string", "value": "decimal"})
+		for index, value := range requireArray(t, item["Guid"], "Metadata[0].Guid", 3) {
+			guid := requireObject(t, value, "Metadata[0].Guid")
+			assertObjectShape(t, guid, fmt.Sprintf("Metadata[0].Guid[%d]", index), map[string]string{"id": "string"})
+		}
+		for index, value := range requireArray(t, item["Rating"], "Metadata[0].Rating", 2) {
+			rating := requireObject(t, value, "Metadata[0].Rating")
+			assertObjectShape(t, rating, fmt.Sprintf("Metadata[0].Rating[%d]", index), map[string]string{"image": "string", "type": "string", "value": "decimal"})
+		}
 		assertObjectShape(t, requireObject(t, item["Extras"], "Metadata[0].Extras"), "Metadata[0].Extras", map[string]string{"size": "integer"})
 	})
 
@@ -756,8 +811,8 @@ func TestStrictRealPMSDetailXMLShape(t *testing.T) {
 		t.Fatalf("MediaContainer children = %#v", root.Children)
 	}
 	video := root.Children[0]
-	assertXMLAttributeSet(t, "Video", video.Attrs, "ratingKey", "key", "guid", "type", "title", "slug", "thumb", "art", "summary", "duration", "addedAt", "updatedAt", "librarySectionID", "librarySectionKey", "librarySectionTitle", "audienceRating", "audienceRatingImage")
-	wantChildren := []string{"Media", "Image", "Image", "UltraBlurColors", "Guid", "Rating", "Extras"}
+	assertXMLAttributeSet(t, "Video", video.Attrs, "ratingKey", "key", "guid", "type", "title", "titleSort", "slug", "thumb", "art", "studio", "summary", "tagline", "year", "duration", "addedAt", "updatedAt", "librarySectionID", "librarySectionKey", "librarySectionTitle", "contentRating", "audienceRating", "audienceRatingImage", "originallyAvailableAt")
+	wantChildren := []string{"Media", "Image", "Image", "UltraBlurColors", "Guid", "Guid", "Guid", "Rating", "Rating", "Extras"}
 	gotChildren := make([]string, len(video.Children))
 	for index, child := range video.Children {
 		gotChildren[index] = child.XMLName.Local
@@ -783,15 +838,22 @@ func TestStrictRealPMSDetailXMLShape(t *testing.T) {
 	assertXMLAttributeSet(t, "Image[0]", video.Children[1].Attrs, "alt", "type", "url")
 	assertXMLAttributeSet(t, "Image[1]", video.Children[2].Attrs, "alt", "type", "url")
 	assertXMLAttributeSet(t, "UltraBlurColors", video.Children[3].Attrs, "topLeft", "topRight", "bottomRight", "bottomLeft")
-	assertXMLAttributeSet(t, "Guid", video.Children[4].Attrs, "id")
-	assertXMLAttributeSet(t, "Rating", video.Children[5].Attrs, "image", "type", "value")
-	assertXMLAttributeSet(t, "Extras", video.Children[6].Attrs, "size")
-
-	if got := attributeValue(video.Attrs, "audienceRating"); got != "8.0" {
-		t.Errorf("XML audienceRating = %q, want 8.0", got)
+	for index := 4; index <= 6; index++ {
+		assertXMLAttributeSet(t, "Guid", video.Children[index].Attrs, "id")
 	}
-	if got := attributeValue(video.Children[5].Attrs, "value"); got != "8.0" {
-		t.Errorf("XML Rating value = %q, want 8.0", got)
+	for index := 7; index <= 8; index++ {
+		assertXMLAttributeSet(t, "Rating", video.Children[index].Attrs, "image", "type", "value")
+	}
+	assertXMLAttributeSet(t, "Extras", video.Children[9].Attrs, "size")
+
+	if got := attributeValue(video.Attrs, "audienceRating"); got != "6.1" {
+		t.Errorf("XML audienceRating = %q, want 6.1", got)
+	}
+	if got := attributeValue(video.Children[7].Attrs, "value"); got != "6.1" {
+		t.Errorf("XML Rating[0] value = %q, want 6.1", got)
+	}
+	if got := attributeValue(video.Children[8].Attrs, "value"); got != "6.4" {
+		t.Errorf("XML Rating[1] value = %q, want 6.4", got)
 	}
 }
 
@@ -824,7 +886,7 @@ func TestMovieListAndDetailProjectionsDifferLikePMS(t *testing.T) {
 	if listItem.Media[0].Part[0].Accessible != nil || listItem.Media[0].Part[0].Exists != nil {
 		t.Error("list Part contains checkFiles availability")
 	}
-	if len(detailItem.Guids) != 1 || len(detailItem.Ratings) != 1 || detailItem.Extras == nil {
+	if len(detailItem.Guids) != 3 || len(detailItem.Ratings) != 2 || detailItem.Extras == nil {
 		t.Errorf("detail structures missing: %#v", detailItem)
 	}
 	if got := len(detailItem.Media[0].Part[0].Stream); got != 2 {

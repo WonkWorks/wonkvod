@@ -139,7 +139,9 @@ type movie struct {
 	Slug                  string           `json:"slug" xml:"slug,attr"`
 	Thumb                 string           `json:"thumb" xml:"thumb,attr"`
 	Art                   string           `json:"art" xml:"art,attr"`
+	Studio                string           `json:"studio,omitempty" xml:"studio,attr,omitempty"`
 	Summary               string           `json:"summary" xml:"summary,attr"`
+	Tagline               string           `json:"tagline,omitempty" xml:"tagline,attr,omitempty"`
 	Year                  int              `json:"year,omitempty" xml:"year,attr,omitempty"`
 	Duration              int              `json:"duration" xml:"duration,attr"`
 	AddedAt               int64            `json:"addedAt" xml:"addedAt,attr"`
@@ -745,13 +747,15 @@ func syntheticMovie() movie {
 		GUID:                  movieGUID,
 		Type:                  "movie",
 		Title:                 movieTitle,
-		TitleSort:             movieTitle,
+		TitleSort:             "'90s Christmas",
 		OriginalTitle:         movieTitle,
 		Slug:                  movieSlug,
 		Thumb:                 movieThumbPath,
 		Art:                   movieArtPath,
-		Summary:               "A synthetic movie served entirely by WonkVOD.",
-		Year:                  2026,
+		Studio:                "Vortex Productions",
+		Summary:               "Workaholic lawyer Lucy Miller is celebrating her promotion alone on Christmas Eve when a mysterious rideshare experience transports her back to 1999. Reliving the holiday with her mom, sister and best friend - not to mention her high school crush - Lucy gets a second chance to understand where her relationships went wrong. Will this magical journey help her rewrite her future or leave her destined to be alone?",
+		Tagline:               "Rewind to the one that got away",
+		Year:                  2024,
 		Duration:              movieDuration,
 		AddedAt:               movieAddedAt,
 		UpdatedAt:             movieUpdatedAt,
@@ -759,26 +763,28 @@ func syntheticMovie() movie {
 		LibrarySectionKey:     "/library/sections/1",
 		LibrarySectionTitle:   libraryName,
 		LibrarySectionUUID:    libraryUUID,
-		ContentRating:         "NR",
-		Rating:                8.0,
-		AudienceRating:        8.0,
-		AudienceRatingImage:   "themoviedb://image.rating",
-		OriginallyAvailableAt: "2026-10-01",
+		ContentRating:         "TV-G",
+		AudienceRating:        6.1,
+		AudienceRatingImage:   "imdb://image.rating",
+		OriginallyAvailableAt: "2024-11-01",
 		UltraBlurColors: &ultraBlurColors{
-			TopLeft:     "14213d",
-			TopRight:    "355070",
-			BottomRight: "6d597a",
-			BottomLeft:  "1b263b",
+			TopLeft:     "332254",
+			TopRight:    "3b51ba",
+			BottomRight: "8c4924",
+			BottomLeft:  "af1115",
 		},
 		Images: []plexImage{
 			{Alt: movieTitle, Type: "coverPoster", URL: movieThumbPath},
 			{Alt: movieTitle, Type: "background", URL: movieArtPath},
 		},
 		Guids: []plexGuid{
-			{ID: "tmdb://601860"},
+			{ID: "imdb://tt16270280"},
+			{ID: "tmdb://1361210"},
+			{ID: "tvdb://360893"},
 		},
 		Ratings: []plexRating{
-			{Image: "themoviedb://image.rating", Type: "audience", Value: 8.0},
+			{Image: "imdb://image.rating", Type: "audience", Value: 6.1},
+			{Image: "themoviedb://image.rating", Type: "audience", Value: 6.4},
 		},
 		Media: []media{syntheticMedia()},
 	}
@@ -788,6 +794,8 @@ func syntheticMovieList() movie {
 	item := cloneMovie(syntheticMovie())
 	item.TitleSort = ""
 	item.OriginalTitle = ""
+	item.Studio = ""
+	item.Tagline = ""
 	item.Year = 0
 	item.LibrarySectionID = 0
 	item.LibrarySectionKey = ""
@@ -811,13 +819,9 @@ func syntheticMovieList() movie {
 
 func syntheticMovieDetail(includeExtras, checkFiles bool) movie {
 	item := cloneMovie(syntheticMovie())
-	item.TitleSort = ""
 	item.OriginalTitle = ""
-	item.Year = 0
 	item.LibrarySectionUUID = ""
-	item.ContentRating = ""
 	item.Rating = 0
-	item.OriginallyAvailableAt = ""
 	if includeExtras {
 		item.Extras = &extras{Size: 0}
 	}
