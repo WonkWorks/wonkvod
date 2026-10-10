@@ -354,7 +354,10 @@ func TestLibraryUUIDIsStableAndConsistentAcrossResponses(t *testing.T) {
 		writer(response)
 		responses[name] = response
 	}
-	record("providers", writeMediaProviders)
+	record("providers", func(w http.ResponseWriter) {
+		request := httptest.NewRequest(http.MethodGet, "/media/providers?includePreferences=1", nil)
+		writeMediaProviders(w, request)
+	})
 	record("sections", writeLibrarySections)
 	record("section detail", writeLibrarySection)
 	record("movie list", writeMovieLibrary)
@@ -617,7 +620,8 @@ func hubObjects(t *testing.T, container map[string]any, count int) []map[string]
 
 func TestMediaProvidersAdvertisesOnlySupportedPromotedCapability(t *testing.T) {
 	response := httptest.NewRecorder()
-	writeMediaProviders(response)
+	request := httptest.NewRequest(http.MethodGet, "/media/providers?includePreferences=1", nil)
+	writeMediaProviders(response, request)
 	container := responseContainerObject(t, response)
 	providers := requireArray(t, container["MediaProvider"], "MediaContainer.MediaProvider", 1)
 	provider := requireObject(t, providers[0], "MediaContainer.MediaProvider[0]")
@@ -640,10 +644,117 @@ func TestMediaProvidersAdvertisesOnlySupportedPromotedCapability(t *testing.T) {
 	if promotedCount != 1 {
 		t.Fatalf("promoted feature count = %d", promotedCount)
 	}
-	for _, unsupported := range []string{"search", "match", "rate", "imagetranscoder", "continuewatching", "playlist", "collection", "universalsearch"} {
+	for _, unsupported := range []string{
+		"search", "match", "rate", "imagetranscoder", "continuewatching", "actions", "playlist", "collection",
+		"manage", "queryParser", "subscribe", "universalsearch",
+	} {
 		if featureTypes[unsupported] {
 			t.Errorf("unsupported feature %q was advertised", unsupported)
 		}
+	}
+}
+
+func TestMediaProviderContentMatchesSafePMSControlFields(t *testing.T) {
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/media/providers?includePreferences=1", nil)
+	writeMediaProviders(response, request)
+	container := responseContainerObject(t, response)
+	providers := requireArray(t, container["MediaProvider"], "MediaContainer.MediaProvider", 1)
+	provider := requireObject(t, providers[0], "MediaContainer.MediaProvider[0]")
+	if provider["identifier"] != "com.plexapp.plugins.library" || provider["title"] != "Library" ||
+		provider["types"] != "video" || provider["protocols"] != "stream" {
+		t.Fatalf("provider identity/capability declaration = %#v", provider)
+	}
+
+	features := requireArray(t, provider["Feature"], "Feature", 5)
+	var content map[string]any
+	for _, value := range features {
+		feature := requireObject(t, value, "Feature")
+		if feature["type"] == "content" {
+			content = feature
+		}
+	}
+	if content == nil {
+		t.Fatal("content feature is missing")
+	}
+	assertObjectShape(t, content, "content Feature", map[string]string{"key": "string", "type": "string", "Directory": "array"})
+	if content["key"] != "/library/sections" {
+		t.Fatalf("content feature key = %#v", content["key"])
+	}
+
+	directories := requireArray(t, content["Directory"], "content Feature.Directory", 2)
+	home := requireObject(t, directories[0], "content Feature.Directory[0]")
+	assertObjectShape(t, home, "home Directory", map[string]string{"hubKey": "string", "title": "string"})
+	if home["hubKey"] != "/hubs" || home["title"] != "Home" {
+		t.Errorf("home Directory = %#v", home)
+	}
+
+	section := requireObject(t, directories[1], "content Feature.Directory[1]")
+	assertObjectShape(t, section, "section Directory", map[string]string{
+		"agent": "string", "hubKey": "string", "id": "string", "key": "string", "language": "string",
+		"refreshing": "boolean", "scannedAt": "integer", "scanner": "string", "title": "string", "type": "string",
+		"updatedAt": "integer", "uuid": "string", "Preferences": "object", "Pivot": "array",
+	})
+	if section["id"] != libraryID || section["key"] != "/library/sections/1" || section["hubKey"] != "/hubs/sections/1" ||
+		section["type"] != "movie" || section["uuid"] != libraryUUID || section["agent"] != "tv.plex.agents.movie" ||
+		section["scanner"] != "Plex Movie" || section["language"] != "en-US" || section["refreshing"] != false ||
+		section["updatedAt"] != json.Number("1790910137") || section["scannedAt"] != json.Number("1790910139") {
+		t.Errorf("section content identity = %#v", section)
+	}
+	pivots := requireArray(t, section["Pivot"], "section Directory.Pivot", 3)
+	wantPivots := []map[string]any{
+		{"id": "recommended", "key": "/hubs/sections/1", "type": "hub", "title": "Recommended", "context": "content.discover", "symbol": "star"},
+		{"id": "library", "key": "/library/sections/1/all?type=1", "type": "list", "title": "Library", "context": "content.library", "symbol": "library"},
+		{"id": "categories", "key": "/library/sections/1/categories", "type": "list", "title": "Categories", "context": "content.categories", "symbol": "stack"},
+	}
+	for index, value := range pivots {
+		pivot := requireObject(t, value, "section Directory.Pivot")
+		if !reflect.DeepEqual(pivot, wantPivots[index]) {
+			t.Errorf("Pivot[%d] = %#v, want %#v", index, pivot, wantPivots[index])
+		}
+	}
+
+	preferences := requireObject(t, section["Preferences"], "section Directory.Preferences")
+	assertObjectShape(t, preferences, "section Directory.Preferences", map[string]string{"Setting": "array"})
+	settings := requireArray(t, preferences["Setting"], "section Directory.Preferences.Setting", 3)
+	wantValues := map[string]string{"hidden": "0", "ratingsSource": "rottentomatoes", "collectionMode": "2"}
+	for _, value := range settings {
+		setting := requireObject(t, value, "embedded Setting")
+		id, _ := setting["id"].(string)
+		if setting["value"] != wantValues[id] || setting["hidden"] != false || setting["advanced"] != false {
+			t.Errorf("embedded preference %q = %#v", id, setting)
+		}
+		delete(wantValues, id)
+	}
+	if len(wantValues) != 0 {
+		t.Errorf("missing embedded preferences: %#v", wantValues)
+	}
+
+	withoutPreferences := httptest.NewRecorder()
+	writeMediaProviders(withoutPreferences, httptest.NewRequest(http.MethodGet, "/media/providers", nil))
+	withoutContainer := responseContainerObject(t, withoutPreferences)
+	withoutProviders := requireArray(t, withoutContainer["MediaProvider"], "MediaContainer.MediaProvider", 1)
+	withoutProvider := requireObject(t, withoutProviders[0], "MediaContainer.MediaProvider[0]")
+	withoutFeatures := requireArray(t, withoutProvider["Feature"], "Feature", 5)
+	for _, value := range withoutFeatures {
+		feature := requireObject(t, value, "Feature")
+		if feature["type"] != "content" {
+			continue
+		}
+		directories := requireArray(t, feature["Directory"], "content Feature.Directory", 2)
+		section := requireObject(t, directories[1], "content Feature.Directory[1]")
+		if _, present := section["Preferences"]; present {
+			t.Error("provider response without includePreferences unexpectedly embeds Preferences")
+		}
+	}
+}
+
+func TestRootTruthfullyAdvertisesMediaProviders(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeRoot(response)
+	container := responseContainerObject(t, response)
+	if container["mediaProviders"] != true {
+		t.Fatalf("root mediaProviders = %#v, want true", container["mediaProviders"])
 	}
 }
 

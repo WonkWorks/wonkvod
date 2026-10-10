@@ -28,9 +28,11 @@ const (
 	version    = "1.43.2.10687-563d026ea"
 	apiVersion = "1.2.2"
 
-	libraryID   = "1"
-	libraryUUID = "10d9d706-97da-4e34-b740-55f0ef3e309c"
-	libraryName = "WonkVOD Movies"
+	libraryID        = "1"
+	libraryUUID      = "10d9d706-97da-4e34-b740-55f0ef3e309c"
+	libraryName      = "WonkVOD Movies"
+	libraryUpdatedAt = 1790910137
+	libraryScannedAt = 1790910139
 
 	movieRatingKey = "1001"
 	movieGUID      = "plex://movie/61a8a0880e2b362bf841341c"
@@ -596,8 +598,8 @@ func writeIdentity(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(body))
 }
 
-func libraryDirectory() map[string]any {
-	return map[string]any{
+func libraryDirectory(includePreferences bool) map[string]any {
+	directory := map[string]any{
 		"agent":      "tv.plex.agents.movie",
 		"scanner":    "Plex Movie",
 		"language":   "en-US",
@@ -608,7 +610,8 @@ func libraryDirectory() map[string]any {
 		"hubKey":     "/hubs/sections/" + libraryID,
 		"type":       "movie",
 		"title":      libraryName,
-
+		"updatedAt":  libraryUpdatedAt,
+		"scannedAt":  libraryScannedAt,
 		"Pivot": []any{
 			map[string]any{
 				"id":      "recommended",
@@ -636,6 +639,10 @@ func libraryDirectory() map[string]any {
 			},
 		},
 	}
+	if includePreferences {
+		directory["Preferences"] = map[string]any{"Setting": libraryPreferences()}
+	}
+	return directory
 }
 
 func boolPointer(value plexBool) *plexBool {
@@ -1076,11 +1083,13 @@ func writeRoot(w http.ResponseWriter) {
 			"platform":          "Linux",
 			"myPlex":            true,
 			"myPlexSigninState": "ok",
+			"mediaProviders":    true,
 		},
 	})
 }
 
-func writeMediaProviders(w http.ResponseWriter) {
+func writeMediaProviders(w http.ResponseWriter, r *http.Request) {
+	includePreferences := r.URL.Query().Get("includePreferences") == "1"
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
 			"size":              1,
@@ -1108,7 +1117,7 @@ func writeMediaProviders(w http.ResponseWriter) {
 									"hubKey": "/hubs",
 									"title":  "Home",
 								},
-								libraryDirectory(),
+								libraryDirectory(includePreferences),
 							},
 						},
 						map[string]any{
@@ -1214,7 +1223,7 @@ func libraryPreference(id, settingType, value, defaultValue, label, summary stri
 	}
 }
 
-func writeLibrarySectionPrefs(w http.ResponseWriter) {
+func libraryPreferences() []any {
 	hidden := libraryPreference(
 		"hidden", "int", "0", "0", "Visibility",
 		"Restrict where content from this library should appear.",
@@ -1233,7 +1242,11 @@ func writeLibrarySectionPrefs(w http.ResponseWriter) {
 	)
 	collectionMode["enumValues"] = "0:Hide collections but show their items|1:Hide items which are in collections|2:Show collections and their items"
 
-	settings := []any{hidden, ratingsSource, collectionMode}
+	return []any{hidden, ratingsSource, collectionMode}
+}
+
+func writeLibrarySectionPrefs(w http.ResponseWriter) {
+	settings := libraryPreferences()
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
 			"size":    len(settings),
@@ -1560,7 +1573,7 @@ func main() {
 		if handleOptions(w, r) {
 			return
 		}
-		writeMediaProviders(w)
+		writeMediaProviders(w, r)
 	})
 
 	http.HandleFunc("/:/resources/movie.png", func(w http.ResponseWriter, r *http.Request) {
