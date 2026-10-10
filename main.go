@@ -53,6 +53,13 @@ const (
 
 	defaultPMSUpstream  = "http://plex-identity:32400"
 	sacrificialPartPath = "/library/parts/1/1790908037/file.mp4"
+
+	sacrificialLibraryName = "WonkPlex Exact-Bytes Comparison"
+	sacrificialMovieGUID   = "plex://movie/5d7770e2dd931c001e395649"
+	sacrificialMovieThumb  = "/library/metadata/1/thumb/1790910140"
+	sacrificialMovieArt    = "/library/metadata/1/art/1790910140"
+	sacrificialDuration    = 5021
+	sacrificialBitrate     = 323
 )
 
 type plexBool bool
@@ -615,6 +622,27 @@ func pmsPassthroughMediaHandler(upstream, mediaPath string) (http.Handler, error
 	}), nil
 }
 
+func pmsPassthroughMetadataHandler(upstream, mediaPath string) (http.Handler, error) {
+	passthrough, err := pmsPassthroughHandler(upstream)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/library/sections/1/all" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+			writeSacrificialMovieLibrary(w, r)
+		case r.URL.Path == "/library/metadata/1" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+			writeSacrificialMovieMetadata(w, r)
+		case r.URL.Path == sacrificialPartPath && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+			addCommonHeaders(w)
+			http.ServeFile(w, r, mediaPath)
+		default:
+			passthrough.ServeHTTP(w, r)
+		}
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -629,6 +657,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughMediaHandler(upstream, testFile)
+	case "passthrough-metadata":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughMetadataHandler(upstream, testFile)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}
@@ -914,6 +947,88 @@ func syntheticMovieDetail(includeExtras, checkFiles bool) movie {
 		item.Media[0].Part[0].Accessible = boolPointer(true)
 		item.Media[0].Part[0].Exists = boolPointer(true)
 	}
+	return item
+}
+
+func sacrificialMovie() movie {
+	item := cloneMovie(syntheticMovie())
+	item.RatingKey = "1"
+	item.Key = "/library/metadata/1"
+	item.GUID = sacrificialMovieGUID
+	item.Title = "test2"
+	item.Slug = "test2"
+	item.Thumb = sacrificialMovieThumb
+	item.Art = sacrificialMovieArt
+	item.Summary = "test2"
+	item.Duration = sacrificialDuration
+	item.AddedAt = 1790908037
+	item.UpdatedAt = 1790910140
+	item.LibrarySectionID = 1
+	item.LibrarySectionKey = "/library/sections/1"
+	item.LibrarySectionTitle = sacrificialLibraryName
+	item.LibrarySectionUUID = libraryUUID
+	item.Images = []plexImage{
+		{Alt: "test2", Type: "coverPoster", URL: sacrificialMovieThumb},
+		{Alt: "test2", Type: "background", URL: sacrificialMovieArt},
+	}
+	item.Guids = []plexGuid{{ID: "tmdb://601860"}}
+	item.Media = []media{sacrificialMedia()}
+	return item
+}
+
+func sacrificialMovieList() movie {
+	item := cloneMovie(sacrificialMovie())
+	item.TitleSort = ""
+	item.OriginalTitle = ""
+	item.Studio = ""
+	item.Tagline = ""
+	item.Year = 0
+	item.LibrarySectionID = 0
+	item.LibrarySectionKey = ""
+	item.LibrarySectionTitle = ""
+	item.LibrarySectionUUID = ""
+	item.ContentRating = ""
+	item.Rating = 0
+	item.OriginallyAvailableAt = ""
+	item.Guids = nil
+	item.Ratings = nil
+	item.Extras = nil
+	for mediaIndex := range item.Media {
+		for partIndex := range item.Media[mediaIndex].Part {
+			item.Media[mediaIndex].Part[partIndex].Accessible = nil
+			item.Media[mediaIndex].Part[partIndex].Exists = nil
+			item.Media[mediaIndex].Part[partIndex].Stream = nil
+		}
+	}
+	return item
+}
+
+func sacrificialMovieDetail(includeExtras, checkFiles bool) movie {
+	item := cloneMovie(sacrificialMovie())
+	item.OriginalTitle = ""
+	item.LibrarySectionUUID = ""
+	item.Rating = 0
+	if includeExtras {
+		item.Extras = &extras{Size: 0}
+	}
+	if checkFiles {
+		item.Media[0].Part[0].Accessible = boolPointer(true)
+		item.Media[0].Part[0].Exists = boolPointer(true)
+	}
+	return item
+}
+
+func sacrificialMedia() media {
+	item := syntheticMedia()
+	item.ID = 1
+	item.Duration = sacrificialDuration
+	item.Bitrate = sacrificialBitrate
+	item.Part[0].ID = 1
+	item.Part[0].Key = sacrificialPartPath
+	item.Part[0].Duration = sacrificialDuration
+	item.Part[0].File = "/media/test2.mp4"
+	item.Part[0].Stream[0].ID = 1
+	item.Part[0].Stream[1].ID = 2
 	return item
 }
 
@@ -1374,6 +1489,34 @@ func metadataContainer(includeExtras, checkFiles bool) mediaContainer {
 func writeMovieMetadata(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	writeNegotiatedMediaContainer(w, r, metadataContainer(
+		query.Get("includeExtras") == "1",
+		query.Get("checkFiles") == "1",
+	))
+}
+
+func sacrificialMovieLibraryContainer() mediaContainer {
+	container := movieLibraryContainer()
+	container.LibrarySectionTitle = sacrificialLibraryName
+	container.Title1 = sacrificialLibraryName
+	container.Title2 = "All " + sacrificialLibraryName
+	container.Metadata = []movie{sacrificialMovieList()}
+	return container
+}
+
+func writeSacrificialMovieLibrary(w http.ResponseWriter, r *http.Request) {
+	writeNegotiatedMediaContainer(w, r, sacrificialMovieLibraryContainer())
+}
+
+func sacrificialMetadataContainer(includeExtras, checkFiles bool) mediaContainer {
+	container := metadataContainer(includeExtras, checkFiles)
+	container.LibrarySectionTitle = sacrificialLibraryName
+	container.Metadata = []movie{sacrificialMovieDetail(includeExtras, checkFiles)}
+	return container
+}
+
+func writeSacrificialMovieMetadata(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query()
+	writeNegotiatedMediaContainer(w, r, sacrificialMetadataContainer(
 		query.Get("includeExtras") == "1",
 		query.Get("checkFiles") == "1",
 	))
