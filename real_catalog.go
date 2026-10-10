@@ -554,6 +554,34 @@ func (c *catalogRuntime) playable(ratingKey string) (catalogPlayable, bool) {
 	return catalogPlayable{}, false
 }
 
+func (c *catalogRuntime) metadataKind(ratingKey string) (string, bool) {
+	if ratingKey == "" {
+		return "", false
+	}
+	snapshot := c.snapshotCopy()
+	for _, movie := range snapshot.Movies {
+		if movieObjectID(movie) == ratingKey {
+			return "movie", true
+		}
+	}
+	for _, show := range snapshot.Shows {
+		if showObjectID(show) == ratingKey {
+			return "show", true
+		}
+		for _, season := range show.Seasons {
+			if seasonObjectID(show, season) == ratingKey {
+				return "season", true
+			}
+			for _, episode := range season.Episodes {
+				if episodeObjectID(episode) == ratingKey {
+					return "episode", true
+				}
+			}
+		}
+	}
+	return "", false
+}
+
 func (c *catalogRuntime) source(item catalogPlayable) (*xtream.VODSource, error) {
 	key := item.Kind + ":" + item.SourceID
 	c.mu.RLock()

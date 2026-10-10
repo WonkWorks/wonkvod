@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"net/url"
@@ -13,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"wonkvod/internal/xtream"
 )
 
 type realCatalogHandler struct {
@@ -21,7 +25,12 @@ type realCatalogHandler struct {
 	httpClient  *http.Client
 	queueID     atomic.Int64
 	queuesMu    sync.RWMutex
-	queues      map[int64]string
+	queues      map[int64]virtualPlayQueue
+}
+
+type virtualPlayQueue struct {
+	SelectedKey string
+	ContextKey  string
 }
 
 func newRealCatalogHandler(upstream string) (http.Handler, error) {
@@ -35,7 +44,7 @@ func newRealCatalogHandler(upstream string) (http.Handler, error) {
 	}
 	handler := &realCatalogHandler{
 		catalog: catalog, passthrough: passthrough,
-		httpClient: &http.Client{Timeout: 45 * time.Second}, queues: make(map[int64]string),
+		httpClient: &http.Client{Timeout: 45 * time.Second}, queues: make(map[int64]virtualPlayQueue),
 	}
 	handler.queueID.Store(1000)
 	return handler, nil
@@ -86,6 +95,11 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.passthrough.ServeHTTP(w, r)
 	case strings.HasPrefix(requestPath, "/library/parts/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		if h.servePart(w, r) {
+			return
+		}
+		h.passthrough.ServeHTTP(w, r)
+	case strings.HasPrefix(requestPath, "/library/parts/") && r.Method == http.MethodPut:
+		if h.acknowledgePart(w, r) {
 			return
 		}
 		h.passthrough.ServeHTTP(w, r)
@@ -642,8 +656,12 @@ func (h *realCatalogHandler) servePart(w http.ResponseWriter, r *http.Request) b
 		http.Error(w, "media source unavailable", http.StatusBadGateway)
 		return true
 	}
-	resp, err := source.Open(r.Context(), r.Method, r.Header.Get("Range"))
+	requestedRange := r.Header.Get("Range")
+	resp, err := source.OpenWithTrace(r.Context(), r.Method, requestedRange, func(event xtream.OpenTrace) {
+		log.Printf("WONKVOD_MEDIA_TRACE phase=upstream source_id=%q part_id=%d method=%q range=%q host=%q source_state=%q attempt=%d upstream_status=%d content_length=%d content_range=%q error_class=%q retry_decision=%q", item.SourceID, id, r.Method, requestedRange, event.Host, event.SourceState, event.Attempt, event.Status, event.ContentLength, event.ContentRange, event.ErrorClass, event.RetryDecision)
+	})
 	if err != nil {
+		log.Printf("WONKVOD_MEDIA_TRACE phase=downstream source_id=%q part_id=%d method=%q range=%q status=%d bytes=0 copy_error=%q", item.SourceID, id, r.Method, requestedRange, http.StatusBadGateway, "upstream_open")
 		http.Error(w, "media source unavailable", http.StatusBadGateway)
 		return true
 	}
@@ -657,11 +675,44 @@ func (h *realCatalogHandler) servePart(w http.ResponseWriter, r *http.Request) b
 	if w.Header().Get("Content-Type") == "" {
 		w.Header().Set("Content-Type", "video/"+item.Extension)
 	}
-	w.WriteHeader(resp.StatusCode)
+	downstreamStatus := resp.StatusCode
+	w.WriteHeader(downstreamStatus)
+	var copied int64
+	var copyErr error
 	if r.Method != http.MethodHead {
-		_, _ = io.Copy(w, resp.Body)
+		copied, copyErr = io.Copy(w, resp.Body)
 	}
+	log.Printf("WONKVOD_MEDIA_TRACE phase=downstream source_id=%q part_id=%d method=%q range=%q status=%d bytes=%d copy_error=%q", item.SourceID, id, r.Method, requestedRange, downstreamStatus, copied, mediaCopyErrorClass(copyErr))
 	return true
+}
+
+func (h *realCatalogHandler) acknowledgePart(w http.ResponseWriter, r *http.Request) bool {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 3 {
+		return false
+	}
+	id, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return false
+	}
+	if _, ok := h.playableByPartID(id); !ok {
+		return false
+	}
+	writeEmptyContainer(w)
+	return true
+}
+
+func mediaCopyErrorClass(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.Canceled) {
+		return "context_canceled"
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "deadline_exceeded"
+	}
+	return "stream_copy_error"
 }
 
 func (h *realCatalogHandler) artworkURL(metadataPath string) (string, bool) {
@@ -764,16 +815,27 @@ func metadataKeyFromURI(value string) string {
 	return key
 }
 func (h *realCatalogHandler) createPlayQueue(w http.ResponseWriter, r *http.Request) bool {
-	key := metadataKeyFromURI(r.URL.Query().Get("uri"))
-	item, ok := h.catalog.playable(key)
-	if !ok {
+	uriKey := metadataKeyFromURI(r.URL.Query().Get("uri"))
+	selectedKey := metadataKeyFromURI(r.URL.Query().Get("key"))
+	contextKey := ""
+	if _, ok := h.catalog.metadataKind(uriKey); ok {
+		contextKey = uriKey
+	}
+	item, selected := h.catalog.playable(selectedKey)
+	if !selected {
+		item, selected = h.catalog.playable(uriKey)
+	}
+	if !selected {
 		return false
+	}
+	if contextKey == "" {
+		contextKey = item.RatingKey
 	}
 	id := h.queueID.Add(1)
 	h.queuesMu.Lock()
-	h.queues[id] = key
+	h.queues[id] = virtualPlayQueue{SelectedKey: item.RatingKey, ContextKey: contextKey}
 	h.queuesMu.Unlock()
-	h.writePlayQueue(w, r, id, item)
+	h.writePlayQueue(w, r, id, item, contextKey)
 	return true
 }
 func (h *realCatalogHandler) readPlayQueue(w http.ResponseWriter, r *http.Request) bool {
@@ -783,16 +845,16 @@ func (h *realCatalogHandler) readPlayQueue(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	h.queuesMu.RLock()
-	key, ok := h.queues[id]
+	queue, ok := h.queues[id]
 	h.queuesMu.RUnlock()
 	if !ok {
 		return false
 	}
-	item, ok := h.catalog.playable(key)
+	item, ok := h.catalog.playable(queue.SelectedKey)
 	if !ok {
 		return false
 	}
-	h.writePlayQueue(w, r, id, item)
+	h.writePlayQueue(w, r, id, item, queue.ContextKey)
 	return true
 }
 func (h *realCatalogHandler) queueMovie(item catalogPlayable) movie {
@@ -804,10 +866,10 @@ func (h *realCatalogHandler) queueMovie(item catalogPlayable) movie {
 	result := movie{RatingKey: item.RatingKey, Key: "/library/metadata/" + item.RatingKey, GUID: "local://" + item.RatingKey, Type: "episode", Title: item.Title, Slug: slugify(item.Title, ""), Thumb: h.thumbPath(item.RatingKey), Art: h.artPath(showObjectID(*item.Show)), Summary: episode.Details.Plot, Duration: item.Duration, AddedAt: timestamp, UpdatedAt: timestamp, LibrarySectionID: 2, LibrarySectionKey: "/library/sections/2", LibrarySectionTitle: tvLibraryName, LibrarySectionUUID: tvLibraryUUID, Media: []media{h.mediaModel("episode", item.SourceID, item.Extension, item.Duration, item.Bitrate, 0, true, true)}}
 	return result
 }
-func (h *realCatalogHandler) writePlayQueue(w http.ResponseWriter, r *http.Request, id int64, item catalogPlayable) {
+func (h *realCatalogHandler) writePlayQueue(w http.ResponseWriter, r *http.Request, id int64, item catalogPlayable, contextKey string) {
 	projected := h.queueMovie(item)
 	projected.PlayQueueItemID = 1
-	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": 1, "playQueueID": id, "playQueueSelectedItemID": 1, "playQueueSelectedItemOffset": 0, "playQueueTotalCount": 1, "playQueueVersion": 1, "playQueueShuffled": false, "playQueueSourceURI": "library://x/item/" + url.QueryEscape("/library/metadata/"+item.RatingKey), "Metadata": []any{projected}}})
+	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": 1, "playQueueID": id, "playQueueSelectedItemID": 1, "playQueueSelectedItemOffset": 0, "playQueueTotalCount": 1, "playQueueVersion": 1, "playQueueShuffled": false, "playQueueSourceURI": "library://x/item/" + url.QueryEscape("/library/metadata/"+contextKey), "Metadata": []any{projected}}})
 }
 func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Request) bool {
 	key := metadataKeyFromURI(r.URL.Query().Get("path"))

@@ -58,7 +58,7 @@ func TestEpisodeSourceUsesSeriesPath(t *testing.T) {
 	}
 }
 
-func TestVODSourceReusesRedirectAndRefreshesExpiredURL(t *testing.T) {
+func TestVODSourceDoesNotCacheRangeScopedRedirects(t *testing.T) {
 	media := []byte("0123456789abcdefghijklmnopqrstuvwxyz")
 	var authorizeCalls atomic.Int32
 	var token atomic.Int32
@@ -90,22 +90,87 @@ func TestVODSourceReusesRedirectAndRefreshesExpiredURL(t *testing.T) {
 	if err != nil || size != int64(len(media)) {
 		t.Fatalf("Size() = %d, %v", size, err)
 	}
+	if source.getResolved() != "" {
+		t.Fatal("size probe cached a range-scoped redirect")
+	}
 	got, err := source.ReadRange(context.Background(), 5, 4)
 	if err != nil || string(got) != "5678" {
 		t.Fatalf("ReadRange() = %q, %v", got, err)
 	}
-	if authorizeCalls.Load() != 1 {
-		t.Fatalf("authorization endpoint called %d times, want 1", authorizeCalls.Load())
+	if source.getResolved() != "" {
+		t.Fatal("range read cached a range-scoped redirect")
+	}
+	if authorizeCalls.Load() != 2 {
+		t.Fatalf("authorization endpoint called %d times, want 2", authorizeCalls.Load())
 	}
 
-	// The cached token expires. The source should retry once through Xtream.
+	// Every independently scoped Range is authorized canonically rather than
+	// reusing the provider's range-specific final URL.
 	token.Store(2)
 	got, err = source.ReadRange(context.Background(), 10, 3)
 	if err != nil || string(got) != "abc" {
 		t.Fatalf("ReadRange() after refresh = %q, %v", got, err)
 	}
-	if authorizeCalls.Load() != 2 {
-		t.Fatalf("authorization endpoint called %d times, want 2", authorizeCalls.Load())
+	if authorizeCalls.Load() != 3 {
+		t.Fatalf("authorization endpoint called %d times, want 3", authorizeCalls.Load())
+	}
+}
+
+func TestOpenRenewsCachedRedirectAfterTransportError(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Host == "stale-cdn.test" {
+			return nil, io.ErrUnexpectedEOF
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK, ContentLength: 4, Body: io.NopCloser(strings.NewReader("data")),
+			Header: make(http.Header), Request: request,
+		}, nil
+	})}
+	source, err := NewVODSource(client, "https://provider.test", "user", "secret", "123", "mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.setResolved("https://stale-cdn.test/file")
+	var events []OpenTrace
+	response, err := source.OpenWithTrace(context.Background(), http.MethodGet, "", func(event OpenTrace) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if len(events) != 2 || events[0].RetryDecision != "renew_canonical_transport_error" || events[1].SourceState != "renewed" || response.StatusCode != http.StatusOK {
+		t.Fatalf("events=%#v status=%d", events, response.StatusCode)
+	}
+}
+
+func TestOpenRejectsRangeScopedCachedRedirectForFullRequest(t *testing.T) {
+	client := &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		status := http.StatusOK
+		header := make(http.Header)
+		body := "full"
+		if request.URL.Host == "range-cdn.test" {
+			status = http.StatusPartialContent
+			header.Set("Content-Range", "bytes 0-3/100")
+			body = "part"
+		}
+		return &http.Response{StatusCode: status, ContentLength: 4, Body: io.NopCloser(strings.NewReader(body)), Header: header, Request: request}, nil
+	})}
+	source, err := NewVODSource(client, "https://provider.test", "user", "secret", "123", "mkv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source.setResolved("https://range-cdn.test/fixed-range")
+	var events []OpenTrace
+	response, err := source.OpenWithTrace(context.Background(), http.MethodGet, "", func(event OpenTrace) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if len(events) != 2 || events[0].RetryDecision != "renew_canonical_unexpected_partial" || response.StatusCode != http.StatusOK {
+		t.Fatalf("events=%#v status=%d", events, response.StatusCode)
 	}
 }
 

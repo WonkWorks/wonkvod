@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -21,6 +22,19 @@ type VODSource struct {
 
 	mu       sync.RWMutex
 	resolved string
+}
+
+// OpenTrace describes one credential-safe upstream media attempt. Host is the
+// only URL component exposed to callers.
+type OpenTrace struct {
+	Attempt       int
+	Host          string
+	SourceState   string
+	Status        int
+	ContentLength int64
+	ContentRange  string
+	ErrorClass    string
+	RetryDecision string
 }
 
 type sizeProbeStatusError struct {
@@ -135,7 +149,6 @@ func (s *VODSource) ProbeCapability(ctx context.Context) (CapabilityProbe, error
 		return facts, &sizeProbeStatusError{statusCode: resp.StatusCode}
 	}
 	facts.Size = total
-	s.setResolved(resp.Request.URL.String())
 	return facts, nil
 }
 
@@ -165,8 +178,6 @@ func (s *VODSource) ReadRange(ctx context.Context, offset, length int64) ([]byte
 	if resp.StatusCode != http.StatusPartialContent {
 		return nil, &rangeStatusError{statusCode: resp.StatusCode}
 	}
-	s.setResolved(resp.Request.URL.String())
-
 	data, err := io.ReadAll(io.LimitReader(resp.Body, length+1))
 	if err != nil {
 		return nil, fmt.Errorf("xtream: read range body: %w", err)
@@ -181,17 +192,30 @@ func (s *VODSource) ReadRange(ctx context.Context, offset, length int64) ([]byte
 // delivery. It reuses the last resolved CDN URL and retries once through the
 // provider authorization URL when that temporary URL expires.
 func (s *VODSource) Open(ctx context.Context, method, rangeHeader string) (*http.Response, error) {
+	return s.OpenWithTrace(ctx, method, rangeHeader, nil)
+}
+
+// OpenWithTrace is Open with a credential-safe callback for each upstream
+// attempt.
+func (s *VODSource) OpenWithTrace(ctx context.Context, method, rangeHeader string, trace func(OpenTrace)) (*http.Response, error) {
 	if method != http.MethodGet && method != http.MethodHead {
 		return nil, errors.New("xtream: unsupported media method")
 	}
 	target := s.getResolved()
+	state := "cached_redirect"
 	if target == "" {
 		target = s.authorizeURL
+		state = "canonical"
 	}
-	request := func(value string) (*http.Response, error) {
+	request := func(value, sourceState string, attempt int) (*http.Response, OpenTrace, error) {
+		event := OpenTrace{Attempt: attempt, SourceState: sourceState}
+		if parsed, err := url.Parse(value); err == nil {
+			event.Host = parsed.Hostname()
+		}
 		req, err := http.NewRequestWithContext(ctx, method, value, nil)
 		if err != nil {
-			return nil, errors.New("xtream: build media request")
+			event.ErrorClass = "request_build"
+			return nil, event, errors.New("xtream: build media request")
 		}
 		if strings.TrimSpace(rangeHeader) != "" {
 			req.Header.Set("Range", rangeHeader)
@@ -199,25 +223,72 @@ func (s *VODSource) Open(ctx context.Context, method, rangeHeader string) (*http
 		req.Header.Set("Accept-Encoding", "identity")
 		resp, err := s.client.Do(req)
 		if err != nil {
-			return nil, &sizeProbeTransportError{}
+			event.ErrorClass = transportErrorClass(err)
+			return nil, event, &sizeProbeTransportError{}
 		}
-		return resp, nil
+		if resp.Request != nil && resp.Request.URL != nil {
+			event.Host = resp.Request.URL.Hostname()
+		}
+		event.Status = resp.StatusCode
+		event.ContentLength = resp.ContentLength
+		event.ContentRange = resp.Header.Get("Content-Range")
+		return resp, event, nil
 	}
-	resp, err := request(target)
+	resp, event, err := request(target, state, 1)
+	retryDecision := ""
+	if state == "cached_redirect" {
+		switch {
+		case err != nil:
+			retryDecision = "renew_canonical_transport_error"
+		case isExpiredStatus(resp.StatusCode):
+			retryDecision = "renew_canonical_expired_status"
+		case strings.TrimSpace(rangeHeader) == "" && resp.StatusCode == http.StatusPartialContent:
+			retryDecision = "renew_canonical_unexpected_partial"
+		}
+	}
+	if retryDecision != "" {
+		event.RetryDecision = retryDecision
+		if trace != nil {
+			trace(event)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		s.clearResolvedIf(target)
+		resp, event, err = request(s.authorizeURL, "renewed", 2)
+	}
+	if trace != nil {
+		trace(event)
+	}
 	if err != nil {
 		return nil, err
 	}
-	if isExpiredStatus(resp.StatusCode) && target != s.authorizeURL {
-		resp.Body.Close()
-		resp, err = request(s.authorizeURL)
-		if err != nil {
-			return nil, err
+	if resp.Request != nil && resp.Request.URL != nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
+		// This provider issues range-scoped redirect URLs. Caching one changes
+		// later no-Range requests into a fixed 206 response, so only a redirect
+		// acquired by an unrestricted request is reusable.
+		if strings.TrimSpace(rangeHeader) == "" && resp.StatusCode != http.StatusPartialContent {
+			s.setResolved(resp.Request.URL.String())
 		}
 	}
-	if resp.Request != nil && resp.Request.URL != nil && resp.StatusCode >= 200 && resp.StatusCode < 400 {
-		s.setResolved(resp.Request.URL.String())
-	}
 	return resp, nil
+}
+
+func transportErrorClass(err error) string {
+	switch {
+	case errors.Is(err, context.Canceled):
+		return "context_canceled"
+	case errors.Is(err, context.DeadlineExceeded):
+		return "deadline_exceeded"
+	}
+	var networkError net.Error
+	if errors.As(err, &networkError) {
+		if networkError.Timeout() {
+			return "network_timeout"
+		}
+		return "network_error"
+	}
+	return "transport_error"
 }
 
 func (s *VODSource) request(ctx context.Context, target string, offset, length int64) (*http.Response, error) {
@@ -244,6 +315,14 @@ func (s *VODSource) getResolved() string {
 func (s *VODSource) setResolved(target string) {
 	s.mu.Lock()
 	s.resolved = target
+	s.mu.Unlock()
+}
+
+func (s *VODSource) clearResolvedIf(target string) {
+	s.mu.Lock()
+	if s.resolved == target {
+		s.resolved = ""
+	}
 	s.mu.Unlock()
 }
 

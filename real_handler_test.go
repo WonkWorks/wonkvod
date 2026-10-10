@@ -61,7 +61,7 @@ func realCatalogTestHandler(t *testing.T) (*realCatalogHandler, *canonicalSnapsh
 		w.WriteHeader(http.StatusTeapot)
 		_, _ = w.Write([]byte("passthrough"))
 	})
-	handler := &realCatalogHandler{catalog: runtime, passthrough: passthrough, httpClient: upstream.Client(), queues: make(map[int64]string)}
+	handler := &realCatalogHandler{catalog: runtime, passthrough: passthrough, httpClient: upstream.Client(), queues: make(map[int64]virtualPlayQueue)}
 	handler.queueID.Store(1000)
 	return handler, &snapshot, mediaBytes
 }
@@ -212,6 +212,63 @@ func TestRealArtworkMediaRangeAndControlSeam(t *testing.T) {
 	fallbackResponse := performRealRequest(handler, http.MethodGet, "/:/scrobble?ratingKey=999", "", nil)
 	if fallbackResponse.Code != http.StatusTeapot || fallbackResponse.Header().Get("X-Test-Upstream") != "true" {
 		t.Fatal("unrelated control request did not fall through")
+	}
+
+	partAck := performRealRequest(handler, http.MethodPut, "/library/parts/"+strconvFormatInt(partID)+"?subtitleStreamID=0&allParts=1", "application/json", nil)
+	if partAck.Code != http.StatusOK || partAck.Header().Get("X-Test-Upstream") != "" {
+		t.Fatal("virtual Part PUT was not acknowledged locally")
+	}
+	unknownPartAck := performRealRequest(handler, http.MethodPut, "/library/parts/999?subtitleStreamID=0", "application/json", nil)
+	if unknownPartAck.Code != http.StatusTeapot || unknownPartAck.Header().Get("X-Test-Upstream") != "true" {
+		t.Fatal("unknown Part PUT did not fall through")
+	}
+}
+
+func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
+	handler, snapshot, _ := realCatalogTestHandler(t)
+	show := snapshot.Shows[0]
+	season := show.Seasons[0]
+	episode := season.Episodes[0]
+	showID := showObjectID(show)
+	seasonID := seasonObjectID(show, season)
+	episodeID := episodeObjectID(episode)
+
+	requestQueue := func(contextID string) map[string]any {
+		t.Helper()
+		target := "/playQueues?type=video&continuous=1&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+contextID) + "&key=" + url.QueryEscape("/library/metadata/"+episodeID)
+		return decodeContainer(t, performRealRequest(handler, http.MethodPost, target, "application/json", nil))
+	}
+	for _, contextID := range []string{showID, seasonID} {
+		queue := requestQueue(contextID)
+		metadata := queue["Metadata"].([]any)[0].(map[string]any)
+		if metadata["ratingKey"] != episodeID || metadata["type"] != "episode" {
+			t.Fatalf("context=%s selected metadata=%#v", contextID, metadata)
+		}
+		if !strings.Contains(queue["playQueueSourceURI"].(string), url.QueryEscape("/library/metadata/"+contextID)) {
+			t.Fatalf("context=%s source URI=%q", contextID, queue["playQueueSourceURI"])
+		}
+		queueID := int64(queue["playQueueID"].(float64))
+		read := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/playQueues/"+strconv.FormatInt(queueID, 10), "application/json", nil))
+		if read["Metadata"].([]any)[0].(map[string]any)["ratingKey"] != episodeID {
+			t.Fatalf("GET queue did not retain episode: %#v", read)
+		}
+	}
+
+	decision := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/video/:/transcode/universal/decision?path="+url.QueryEscape("/library/metadata/"+episodeID), "application/json", nil))
+	selected := decision["Metadata"].([]any)[0].(map[string]any)
+	if selected["ratingKey"] != episodeID || selected["Media"].([]any)[0].(map[string]any)["Part"].([]any)[0].(map[string]any)["key"] != "/library/parts/"+strconvFormatInt(partObjectID("episode", episode.SourceID))+"/file.mp4" {
+		t.Fatalf("decision did not resolve episode: %#v", selected)
+	}
+
+	unknown := "/playQueues?type=video&continuous=1&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/999") + "&key=" + url.QueryEscape("/library/metadata/998")
+	fallbackResponse := performRealRequest(handler, http.MethodPost, unknown, "application/json", nil)
+	if fallbackResponse.Code != http.StatusTeapot || fallbackResponse.Header().Get("X-Test-Upstream") != "true" {
+		t.Fatal("unknown TV queue did not fall through")
+	}
+	malformed := "/playQueues?type=video&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/not-a-wonkvod-id") + "&key=bad"
+	fallbackResponse = performRealRequest(handler, http.MethodPost, malformed, "application/json", nil)
+	if fallbackResponse.Code != http.StatusTeapot || fallbackResponse.Header().Get("X-Test-Upstream") != "true" {
+		t.Fatal("malformed TV queue did not fall through")
 	}
 }
 
