@@ -4,7 +4,8 @@ FROM golang:1.25-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY main.go ./
+COPY *.go ./
+COPY fixtures ./fixtures
 ARG VCS_REF=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/wonkvod .
 

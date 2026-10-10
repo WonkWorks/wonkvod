@@ -19,6 +19,7 @@ services:
     pids_limit: 128
     environment:
       WONKVOD_PMS_MODE: "${WONKVOD_PMS_MODE:-synthetic}"
+      WONKVOD_PROVIDER_VARIANT: "${WONKVOD_PROVIDER_VARIANT:-real}"
       WONKVOD_PMS_UPSTREAM: "http://plex-identity:32400"
     volumes:
       - type: bind

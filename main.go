@@ -736,6 +736,25 @@ func pmsPassthroughProviderHandler(upstream, mediaPath string) (http.Handler, er
 	}), nil
 }
 
+func pmsPassthroughProviderBisectHandler(upstream, mediaPath, variant string) (http.Handler, error) {
+	library, err := pmsPassthroughLibraryHandler(upstream, mediaPath)
+	if err != nil {
+		return nil, err
+	}
+	provider, err := newProviderBisect(variant)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/media/providers" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			provider.ServeHTTP(w, r)
+			return
+		}
+		library.ServeHTTP(w, r)
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -770,6 +789,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughProviderHandler(upstream, testFile)
+	case "passthrough-provider-bisect":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughProviderBisectHandler(upstream, testFile, os.Getenv("WONKVOD_PROVIDER_VARIANT"))
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}
@@ -1482,7 +1506,11 @@ func sacrificialLibraryDirectory(includePreferences bool) map[string]any {
 
 func writeSacrificialMediaProviders(w http.ResponseWriter, r *http.Request) {
 	includePreferences := r.URL.Query().Get("includePreferences") == "1"
-	writeJSON(w, map[string]any{
+	writeJSON(w, sacrificialMediaProvidersDocument(includePreferences))
+}
+
+func sacrificialMediaProvidersDocument(includePreferences bool) map[string]any {
+	return map[string]any{
 		"MediaContainer": map[string]any{
 			"size":              1,
 			"apiVersion":        apiVersion,
@@ -1515,7 +1543,7 @@ func writeSacrificialMediaProviders(w http.ResponseWriter, r *http.Request) {
 				},
 			},
 		},
-	})
+	}
 }
 
 func writeLibrarySections(w http.ResponseWriter) {
