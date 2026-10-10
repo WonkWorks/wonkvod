@@ -1,0 +1,14 @@
+.git
+.gitignore
+.plex-identity-token
+.agents
+.aws
+.codex
+*.log
+deploy/*.env
+deploy/.env
+*.pem
+*.p12
+*.pfx
+wonkvod
+tls-proxy
