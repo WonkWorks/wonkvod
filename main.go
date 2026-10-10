@@ -826,23 +826,106 @@ func writeMediaProviders(w http.ResponseWriter) {
 func writeLibrarySections(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
-			"size":              1,
-			"friendlyName":      "WonkVOD",
-			"machineIdentifier": machineID,
+			"size":      1,
+			"allowSync": false,
+			"title1":    "Plex Library",
 			"Directory": []any{
-				libraryDirectory(),
+				map[string]any{
+					"agent":                        "tv.plex.agents.movie",
+					"allowSync":                    true,
+					"content":                      true,
+					"createdAt":                    movieAddedAt,
+					"directory":                    true,
+					"filters":                      true,
+					"hidden":                       0,
+					"key":                          libraryID,
+					"language":                     "en-US",
+					"metadataAgentProviderGroupId": 1,
+					"refreshing":                   false,
+					"scannedAt":                    movieUpdatedAt,
+					"scanner":                      "Plex Movie",
+					"title":                        libraryName,
+					"type":                         "movie",
+					"updatedAt":                    movieUpdatedAt,
+					"uuid":                         libraryUUID,
+				},
 			},
 		},
 	})
 }
 
 func writeLibrarySection(w http.ResponseWriter) {
+	directories := []any{
+		map[string]any{"key": "all", "title": "All " + libraryName},
+		map[string]any{"key": "unwatched", "title": "Unwatched"},
+		map[string]any{"key": "newest", "title": "Recently Released"},
+		map[string]any{"key": "recentlyAdded", "title": "Recently Added"},
+		map[string]any{"key": "recentlyViewed", "title": "Recently Viewed"},
+		map[string]any{"key": "onDeck", "title": "Continue Watching"},
+		map[string]any{"key": "collection", "secondary": true, "title": "By Collection"},
+		map[string]any{"key": "genre", "secondary": true, "title": "By Genre"},
+		map[string]any{"key": "year", "secondary": true, "title": "By Year"},
+		map[string]any{"key": "director", "secondary": true, "title": "By Director"},
+		map[string]any{"key": "actor", "secondary": true, "title": "By Starring Actor"},
+		map[string]any{"key": "search?type=1", "prompt": "Search " + libraryName, "search": true, "title": "Search..."},
+	}
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
-			"size": 1,
-			"Directory": []any{
-				libraryDirectory(),
-			},
+			"size":             len(directories),
+			"allowSync":        false,
+			"art":              "/:/resources/movie-fanart.jpg",
+			"content":          "secondary",
+			"identifier":       "com.plexapp.plugins.library",
+			"librarySectionID": 1,
+			"mediaTagPrefix":   "/system/bundle/media/flags/",
+			"mediaTagVersion":  1,
+			"thumb":            "/:/resources/movie.png",
+			"title1":           libraryName,
+			"viewGroup":        "secondary",
+			"viewMode":         65592,
+			"Directory":        directories,
+		},
+	})
+}
+
+func libraryPreference(id, settingType, value, defaultValue, label, summary string) map[string]any {
+	return map[string]any{
+		"advanced": false,
+		"default":  defaultValue,
+		"group":    "",
+		"hidden":   false,
+		"id":       id,
+		"label":    label,
+		"summary":  summary,
+		"type":     settingType,
+		"value":    value,
+	}
+}
+
+func writeLibrarySectionPrefs(w http.ResponseWriter) {
+	hidden := libraryPreference(
+		"hidden", "int", "0", "0", "Visibility",
+		"Restrict where content from this library should appear.",
+	)
+	hidden["enumValues"] = "0:Include in home screen and global search|1:Exclude from home screen|2:Exclude from home screen and global search"
+
+	ratingsSource := libraryPreference(
+		"ratingsSource", "text", "rottentomatoes", "rottentomatoes", "Ratings Source",
+		"Select a primary source for ratings.",
+	)
+	ratingsSource["enumValues"] = "rottentomatoes:Rotten Tomatoes|imdb:IMDb|themoviedb:The Movie Database"
+
+	collectionMode := libraryPreference(
+		"collectionMode", "int", "2", "2", "Collections",
+		"How to display collections on the Library tab.",
+	)
+	collectionMode["enumValues"] = "0:Hide collections but show their items|1:Hide items which are in collections|2:Show collections and their items"
+
+	settings := []any{hidden, ratingsSource, collectionMode}
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":    len(settings),
+			"Setting": settings,
 		},
 	})
 }
@@ -1089,6 +1172,36 @@ func writeEmptyContainer(w http.ResponseWriter) {
 	})
 }
 
+func writeEmptyMovieNavigation(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                0,
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": libraryName,
+			"librarySectionUUID":  libraryUUID,
+			"mediaTagPrefix":      "/system/bundle/media/flags/",
+			"mediaTagVersion":     1,
+			"Metadata":            []any{},
+		},
+	})
+}
+
+func writeEmptyDirectoryNavigation(w http.ResponseWriter) {
+	writeJSON(w, map[string]any{
+		"MediaContainer": map[string]any{
+			"size":                0,
+			"allowSync":           true,
+			"identifier":          "com.plexapp.plugins.library",
+			"librarySectionID":    1,
+			"librarySectionTitle": libraryName,
+			"librarySectionUUID":  libraryUUID,
+			"Directory":           []any{},
+		},
+	})
+}
+
 func writeEmptyPrefs(w http.ResponseWriter) {
 	writeJSON(w, map[string]any{
 		"MediaContainer": map[string]any{
@@ -1191,8 +1304,41 @@ func main() {
 		if handleOptions(w, r) {
 			return
 		}
-		writeEmptyPrefs(w)
+		writeLibrarySectionPrefs(w)
 	})
+
+	for _, path := range []string{
+		"/library/sections/1/unwatched",
+		"/library/sections/1/newest",
+		"/library/sections/1/recentlyAdded",
+		"/library/sections/1/recentlyViewed",
+		"/library/sections/1/onDeck",
+		"/library/sections/1/search",
+	} {
+		http.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			logRequest(r)
+			if handleOptions(w, r) {
+				return
+			}
+			writeEmptyMovieNavigation(w)
+		})
+	}
+
+	for _, path := range []string{
+		"/library/sections/1/collection",
+		"/library/sections/1/genre",
+		"/library/sections/1/year",
+		"/library/sections/1/director",
+		"/library/sections/1/actor",
+	} {
+		http.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
+			logRequest(r)
+			if handleOptions(w, r) {
+				return
+			}
+			writeEmptyDirectoryNavigation(w)
+		})
+	}
 
 	http.HandleFunc("/hubs", func(w http.ResponseWriter, r *http.Request) {
 		logRequest(r)

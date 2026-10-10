@@ -524,6 +524,130 @@ func TestMovieSectionHubsUsePMSContextAndPromotionSemantics(t *testing.T) {
 	}
 }
 
+func TestLibrarySectionsUsePMSSectionSemantics(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeLibrarySections(response)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{
+		"size": "integer", "allowSync": "boolean", "title1": "string", "Directory": "array",
+	})
+	if container["allowSync"] != false || container["title1"] != "Plex Library" {
+		t.Errorf("section container semantics = %#v", container)
+	}
+
+	directories := requireArray(t, container["Directory"], "MediaContainer.Directory", 1)
+	section := requireObject(t, directories[0], "MediaContainer.Directory[0]")
+	assertObjectShape(t, section, "MediaContainer.Directory[0]", map[string]string{
+		"agent": "string", "allowSync": "boolean", "content": "boolean", "createdAt": "integer",
+		"directory": "boolean", "filters": "boolean", "hidden": "integer", "key": "string",
+		"language": "string", "metadataAgentProviderGroupId": "integer", "refreshing": "boolean",
+		"scannedAt": "integer", "scanner": "string", "title": "string", "type": "string",
+		"updatedAt": "integer", "uuid": "string",
+	})
+	if section["key"] != "1" {
+		t.Errorf("section key = %#v, want short key 1", section["key"])
+	}
+	for _, field := range []string{"allowSync", "content", "directory", "filters"} {
+		if section[field] != true {
+			t.Errorf("section %s = %#v, want true", field, section[field])
+		}
+	}
+	if section["hidden"] != json.Number("0") || section["metadataAgentProviderGroupId"] != json.Number("1") || section["refreshing"] != false {
+		t.Errorf("section visibility/provider fields = %#v", section)
+	}
+	if section["uuid"] != libraryUUID || section["title"] != libraryName || section["type"] != "movie" ||
+		section["agent"] != "tv.plex.agents.movie" || section["scanner"] != "Plex Movie" || section["language"] != "en-US" {
+		t.Errorf("protected section identity changed: %#v", section)
+	}
+}
+
+func TestLibrarySectionNavigationMatchesPMSModel(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeLibrarySection(response)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{
+		"size": "integer", "allowSync": "boolean", "art": "string", "content": "string", "identifier": "string",
+		"librarySectionID": "integer", "mediaTagPrefix": "string", "mediaTagVersion": "integer", "thumb": "string",
+		"title1": "string", "viewGroup": "string", "viewMode": "integer", "Directory": "array",
+	})
+	if container["allowSync"] != false || container["content"] != "secondary" || container["identifier"] != "com.plexapp.plugins.library" ||
+		container["librarySectionID"] != json.Number("1") || container["viewGroup"] != "secondary" || container["viewMode"] != json.Number("65592") {
+		t.Errorf("navigation container semantics = %#v", container)
+	}
+
+	directoryValues := requireArray(t, container["Directory"], "MediaContainer.Directory", 12)
+	wantKeys := []string{"all", "unwatched", "newest", "recentlyAdded", "recentlyViewed", "onDeck", "collection", "genre", "year", "director", "actor", "search?type=1"}
+	for index, value := range directoryValues {
+		directory := requireObject(t, value, "Directory")
+		key, _ := directory["key"].(string)
+		if key != wantKeys[index] {
+			t.Errorf("Directory[%d].key = %q, want %q", index, key, wantKeys[index])
+		}
+		switch key {
+		case "collection", "genre", "year", "director", "actor":
+			assertObjectShape(t, directory, "secondary Directory", map[string]string{"key": "string", "secondary": "boolean", "title": "string"})
+			if directory["secondary"] != true {
+				t.Errorf("Directory %q secondary = %#v", key, directory["secondary"])
+			}
+		case "search?type=1":
+			assertObjectShape(t, directory, "search Directory", map[string]string{"key": "string", "prompt": "string", "search": "boolean", "title": "string"})
+			if directory["search"] != true {
+				t.Errorf("search Directory = %#v", directory)
+			}
+		default:
+			assertObjectShape(t, directory, "primary Directory", map[string]string{"key": "string", "title": "string"})
+		}
+	}
+}
+
+func TestLibrarySectionPrefsExposeCapturedClientSettings(t *testing.T) {
+	response := httptest.NewRecorder()
+	writeLibrarySectionPrefs(response)
+	container := responseContainerObject(t, response)
+	assertObjectShape(t, container, "MediaContainer", map[string]string{"size": "integer", "Setting": "array"})
+	settings := requireArray(t, container["Setting"], "MediaContainer.Setting", 3)
+	wantValues := map[string]string{"hidden": "0", "ratingsSource": "rottentomatoes", "collectionMode": "2"}
+	seen := map[string]bool{}
+	for _, value := range settings {
+		setting := requireObject(t, value, "Setting")
+		assertObjectShape(t, setting, "Setting", map[string]string{
+			"advanced": "boolean", "default": "string", "enumValues": "string", "group": "string", "hidden": "boolean",
+			"id": "string", "label": "string", "summary": "string", "type": "string", "value": "string",
+		})
+		id, _ := setting["id"].(string)
+		seen[id] = true
+		if setting["value"] != wantValues[id] || setting["hidden"] != false || setting["advanced"] != false {
+			t.Errorf("setting %q = %#v", id, setting)
+		}
+	}
+	for id := range wantValues {
+		if !seen[id] {
+			t.Errorf("missing preference %q", id)
+		}
+	}
+}
+
+func TestAdvertisedSectionNavigationStubsAreTypedContainers(t *testing.T) {
+	for name, writer := range map[string]func(http.ResponseWriter){
+		"movie list": writeEmptyMovieNavigation,
+		"directory":  writeEmptyDirectoryNavigation,
+	} {
+		t.Run(name, func(t *testing.T) {
+			response := httptest.NewRecorder()
+			writer(response)
+			container := responseContainerObject(t, response)
+			if container["size"] != json.Number("0") || container["identifier"] != "com.plexapp.plugins.library" {
+				t.Errorf("typed empty container = %#v", container)
+			}
+			if name == "movie list" {
+				requireArray(t, container["Metadata"], "MediaContainer.Metadata", 0)
+			} else {
+				requireArray(t, container["Directory"], "MediaContainer.Directory", 0)
+			}
+		})
+	}
+}
+
 func xmlAttributeNames(attributes []xml.Attr) map[string]bool {
 	names := make(map[string]bool, len(attributes))
 	for _, attribute := range attributes {
