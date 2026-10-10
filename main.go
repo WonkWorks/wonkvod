@@ -721,6 +721,21 @@ func pmsPassthroughPresentationHandler(upstream, mediaPath string) (http.Handler
 	}), nil
 }
 
+func pmsPassthroughProviderHandler(upstream, mediaPath string) (http.Handler, error) {
+	library, err := pmsPassthroughLibraryHandler(upstream, mediaPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/media/providers" && (r.Method == http.MethodGet || r.Method == http.MethodHead) {
+			writeSacrificialMediaProviders(w, r)
+			return
+		}
+		library.ServeHTTP(w, r)
+	}), nil
+}
+
 func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Handler, error) {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
 	case "", "synthetic", "wonkvod":
@@ -750,6 +765,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughPresentationHandler(upstream, testFile)
+	case "passthrough-provider":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return pmsPassthroughProviderHandler(upstream, testFile)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}

@@ -828,6 +828,151 @@ func TestPMSPassthroughPresentationModeSelectorAndHealthcheck(t *testing.T) {
 	}
 }
 
+func TestPMSPassthroughProviderOwnsProviderWhileAllHubsRemainUpstream(t *testing.T) {
+	mediaBytes := bytes.Repeat([]byte("wonkvod-stage4a-media-"), 300)
+	mediaPath := t.TempDir() + "/test2.mp4"
+	if err := os.WriteFile(mediaPath, mediaBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"source":"upstream","method":%q,"path":%q,"query":%q}`, r.Method, r.URL.Path, r.URL.RawQuery)
+	}))
+	defer upstream.Close()
+	handler, err := pmsPassthroughProviderHandler(upstream.URL, mediaPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	request := func(method, target, accept string, configure func(*http.Request)) (*httptest.ResponseRecorder, string) {
+		t.Helper()
+		var traceOutput bytes.Buffer
+		traced := traceRequests(handler, log.New(&traceOutput, "", 0))
+		req := httptest.NewRequest(method, target, nil)
+		if accept != "" {
+			req.Header.Set("Accept", accept)
+		}
+		if configure != nil {
+			configure(req)
+		}
+		response := httptest.NewRecorder()
+		traced.ServeHTTP(response, req)
+		return response, traceOutput.String()
+	}
+
+	for _, target := range []string{
+		"/media/providers",
+		"/media/providers?includePreferences=1",
+		"/media/providers?includePreferences=1&includeDetails=1&X-Plex-Container-Start=0",
+	} {
+		response, trace := request(http.MethodGet, target, "application/json", nil)
+		if response.Code != http.StatusOK || !json.Valid(response.Body.Bytes()) || !strings.Contains(trace, `source="wonkvod"`) {
+			t.Errorf("Stage 4A provider %q = status=%d body=%q trace=%s", target, response.Code, response.Body.String(), trace)
+		}
+		direct := httptest.NewRecorder()
+		directRequest := httptest.NewRequest(http.MethodGet, target, nil)
+		writeSacrificialMediaProviders(direct, directRequest)
+		if !bytes.Equal(response.Body.Bytes(), direct.Body.Bytes()) {
+			t.Errorf("Stage 4A provider serializer drifted for %q", target)
+		}
+	}
+
+	for _, target := range []string{
+		"/hubs",
+		"/hubs?identifier=home.continue%2Chome.ondeck&includeDetails=1",
+		"/hubs/promoted?includeMeta=1",
+		"/hubs/continueWatching?includeDetails=1",
+		"/hubs/sections/1?includeCollections=1",
+		"/hubs/home/continueWatching",
+		"/hubs/home/onDeck",
+		"/hubs/home/recentlyAdded?type=1",
+		"/hubs/continueWatching/items",
+		"/hubs/sections/1/continueWatching/items",
+		"/hubs/unimplemented",
+	} {
+		response, trace := request(http.MethodGet, target, "application/json", nil)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"upstream"`) ||
+			!strings.Contains(trace, `source="plex-identity"`) {
+			t.Errorf("Stage 4A hub route %q was not proxied: status=%d body=%q trace=%s", target, response.Code, response.Body.String(), trace)
+		}
+	}
+
+	for _, target := range []string{
+		"/library/sections",
+		"/library/sections/1",
+		"/library/sections/1/prefs",
+		"/library/sections/1/firstCharacter?sort=titleSort",
+		"/library/sections/1/all?type=1&includeDetails=1",
+		"/library/metadata/1?checkFiles=1&includeExtras=1",
+	} {
+		response, trace := request(http.MethodGet, target, "application/json", nil)
+		if response.Code != http.StatusOK || !json.Valid(response.Body.Bytes()) || !strings.Contains(trace, `source="wonkvod"`) {
+			t.Errorf("Stage 4A inherited Stage 3 route %q = status=%d body=%q trace=%s", target, response.Code, response.Body.String(), trace)
+		}
+	}
+
+	for _, control := range []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/"},
+		{http.MethodGet, "/identity"},
+		{http.MethodGet, "/library/metadata/1/related"},
+		{http.MethodGet, sacrificialMovieThumb},
+		{http.MethodGet, sacrificialMovieArt},
+		{http.MethodGet, "/photo/:/transcode"},
+		{http.MethodPost, "/playQueues"},
+		{http.MethodGet, "/video/:/transcode/universal/decision"},
+		{http.MethodPut, sacrificialPartPath},
+		{http.MethodGet, "/:/timeline"},
+		{http.MethodGet, "/status/sessions"},
+		{http.MethodGet, "/activities"},
+		{http.MethodGet, "/:/websockets/notifications"},
+		{http.MethodPost, "/media/providers"},
+	} {
+		response, trace := request(control.method, control.path, "application/json", nil)
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"source":"upstream"`) ||
+			!strings.Contains(trace, `source="plex-identity"`) {
+			t.Errorf("Stage 4A control route %s %s was not proxied: status=%d body=%q trace=%s", control.method, control.path, response.Code, response.Body.String(), trace)
+		}
+	}
+
+	const token = "stage4a-sensitive-token"
+	ranged, rangeTrace := request(http.MethodGet, sacrificialPartPath+"?X-Plex-Token="+token, "video/mp4", func(req *http.Request) {
+		req.Header.Set("Range", "bytes=100-199")
+	})
+	if ranged.Code != http.StatusPartialContent || ranged.Header().Get("Content-Range") != fmt.Sprintf("bytes 100-199/%d", len(mediaBytes)) ||
+		!bytes.Equal(ranged.Body.Bytes(), mediaBytes[100:200]) || !strings.Contains(rangeTrace, `source="wonkvod"`) ||
+		strings.Contains(rangeTrace, token) || !strings.Contains(rangeTrace, "[REDACTED]") {
+		t.Errorf("Stage 4A Part Range = status %d headers %#v trace=%s", ranged.Code, ranged.Header(), rangeTrace)
+	}
+	head, headTrace := request(http.MethodHead, sacrificialPartPath, "", nil)
+	if head.Code != http.StatusOK || head.Body.Len() != 0 || head.Header().Get("Content-Length") != fmt.Sprint(len(mediaBytes)) || !strings.Contains(headTrace, `source="wonkvod"`) {
+		t.Errorf("Stage 4A Part HEAD = status %d headers %#v bytes=%d trace=%s", head.Code, head.Header(), head.Body.Len(), headTrace)
+	}
+	full, fullTrace := request(http.MethodGet, sacrificialPartPath, "", nil)
+	if full.Code != http.StatusOK || !bytes.Equal(full.Body.Bytes(), mediaBytes) || !strings.Contains(fullTrace, `source="wonkvod"`) {
+		t.Errorf("Stage 4A Part full GET = status %d bytes=%d trace=%s", full.Code, full.Body.Len(), fullTrace)
+	}
+}
+
+func TestPMSPassthroughProviderModeSelectorAndHealthcheck(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"MediaContainer":{"machineIdentifier":"` + machineID + `"}}`))
+	}))
+	defer upstream.Close()
+	handler, err := handlerForPMSMode("passthrough-provider", upstream.URL, http.NotFoundHandler())
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/identity", nil))
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), machineID) {
+		t.Fatalf("passthrough-provider health response = status %d body %q", response.Code, response.Body.String())
+	}
+}
+
 func assertSacrificialIdentity(t *testing.T, item movie) {
 	t.Helper()
 	if item.RatingKey != "1" || item.Key != "/library/metadata/1" || item.GUID != sacrificialMovieGUID ||
