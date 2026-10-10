@@ -87,6 +87,16 @@ func (value plexFrameRate) MarshalText() ([]byte, error) {
 	return []byte(strconv.FormatFloat(float64(value), 'f', 3, 64)), nil
 }
 
+type plexRatingValue float64
+
+func (value plexRatingValue) MarshalJSON() ([]byte, error) {
+	return []byte(strconv.FormatFloat(float64(value), 'f', 1, 64)), nil
+}
+
+func (value plexRatingValue) MarshalText() ([]byte, error) {
+	return []byte(strconv.FormatFloat(float64(value), 'f', 1, 64)), nil
+}
+
 type mediaContainer struct {
 	XMLName             xml.Name `json:"-" xml:"MediaContainer"`
 	Size                int      `json:"size" xml:"size,attr"`
@@ -95,7 +105,6 @@ type mediaContainer struct {
 	LibrarySectionID    int      `json:"librarySectionID" xml:"librarySectionID,attr"`
 	LibrarySectionTitle string   `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
 	LibrarySectionUUID  string   `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
-	TotalSize           int      `json:"totalSize,omitempty" xml:"totalSize,attr,omitempty"`
 	Art                 string   `json:"art,omitempty" xml:"art,attr,omitempty"`
 	Thumb               string   `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
 	Title1              string   `json:"title1,omitempty" xml:"title1,attr,omitempty"`
@@ -126,7 +135,7 @@ type movie struct {
 	Thumb                 string           `json:"thumb" xml:"thumb,attr"`
 	Art                   string           `json:"art" xml:"art,attr"`
 	Summary               string           `json:"summary" xml:"summary,attr"`
-	Year                  int              `json:"year" xml:"year,attr"`
+	Year                  int              `json:"year,omitempty" xml:"year,attr,omitempty"`
 	Duration              int              `json:"duration" xml:"duration,attr"`
 	AddedAt               int64            `json:"addedAt" xml:"addedAt,attr"`
 	UpdatedAt             int64            `json:"updatedAt" xml:"updatedAt,attr"`
@@ -134,18 +143,18 @@ type movie struct {
 	LibrarySectionKey     string           `json:"librarySectionKey,omitempty" xml:"librarySectionKey,attr,omitempty"`
 	LibrarySectionTitle   string           `json:"librarySectionTitle,omitempty" xml:"librarySectionTitle,attr,omitempty"`
 	LibrarySectionUUID    string           `json:"librarySectionUUID,omitempty" xml:"librarySectionUUID,attr,omitempty"`
-	ContentRating         string           `json:"contentRating" xml:"contentRating,attr"`
-	Rating                float64          `json:"rating" xml:"rating,attr"`
-	AudienceRating        float64          `json:"audienceRating" xml:"audienceRating,attr"`
+	ContentRating         string           `json:"contentRating,omitempty" xml:"contentRating,attr,omitempty"`
+	Rating                float64          `json:"rating,omitempty" xml:"rating,attr,omitempty"`
+	AudienceRating        plexRatingValue  `json:"audienceRating" xml:"audienceRating,attr"`
 	AudienceRatingImage   string           `json:"audienceRatingImage" xml:"audienceRatingImage,attr"`
-	OriginallyAvailableAt string           `json:"originallyAvailableAt" xml:"originallyAvailableAt,attr"`
+	OriginallyAvailableAt string           `json:"originallyAvailableAt,omitempty" xml:"originallyAvailableAt,attr,omitempty"`
 	PlayQueueItemID       int              `json:"playQueueItemID,omitempty" xml:"playQueueItemID,attr,omitempty"`
-	UltraBlurColors       *ultraBlurColors `json:"UltraBlurColors,omitempty" xml:"UltraBlurColors,omitempty"`
+	Media                 []media          `json:"Media" xml:"Media"`
 	Images                []plexImage      `json:"Image,omitempty" xml:"Image,omitempty"`
+	UltraBlurColors       *ultraBlurColors `json:"UltraBlurColors,omitempty" xml:"UltraBlurColors,omitempty"`
 	Guids                 []plexGuid       `json:"Guid,omitempty" xml:"Guid,omitempty"`
 	Ratings               []plexRating     `json:"Rating,omitempty" xml:"Rating,omitempty"`
 	Extras                *extras          `json:"Extras,omitempty" xml:"Extras,omitempty"`
-	Media                 []media          `json:"Media" xml:"Media"`
 }
 
 type ultraBlurColors struct {
@@ -166,9 +175,9 @@ type plexGuid struct {
 }
 
 type plexRating struct {
-	Image string  `json:"image" xml:"image,attr"`
-	Type  string  `json:"type" xml:"type,attr"`
-	Value float64 `json:"value" xml:"value,attr"`
+	Image string          `json:"image" xml:"image,attr"`
+	Type  string          `json:"type" xml:"type,attr"`
+	Value plexRatingValue `json:"value" xml:"value,attr"`
 }
 
 type extras struct {
@@ -622,10 +631,14 @@ func syntheticMovieList() movie {
 	item := cloneMovie(syntheticMovie())
 	item.TitleSort = ""
 	item.OriginalTitle = ""
+	item.Year = 0
 	item.LibrarySectionID = 0
 	item.LibrarySectionKey = ""
 	item.LibrarySectionTitle = ""
 	item.LibrarySectionUUID = ""
+	item.ContentRating = ""
+	item.Rating = 0
+	item.OriginallyAvailableAt = ""
 	item.Guids = nil
 	item.Ratings = nil
 	item.Extras = nil
@@ -641,6 +654,13 @@ func syntheticMovieList() movie {
 
 func syntheticMovieDetail(includeExtras, checkFiles bool) movie {
 	item := cloneMovie(syntheticMovie())
+	item.TitleSort = ""
+	item.OriginalTitle = ""
+	item.Year = 0
+	item.LibrarySectionUUID = ""
+	item.ContentRating = ""
+	item.Rating = 0
+	item.OriginallyAvailableAt = ""
 	if includeExtras {
 		item.Extras = &extras{Size: 0}
 	}
@@ -825,7 +845,6 @@ func writeLibrarySection(w http.ResponseWriter) {
 func movieLibraryContainer() mediaContainer {
 	return mediaContainer{
 		Size:                1,
-		TotalSize:           1,
 		AllowSync:           true,
 		Identifier:          "com.plexapp.plugins.library",
 		LibrarySectionID:    1,

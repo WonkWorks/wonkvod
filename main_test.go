@@ -177,11 +177,14 @@ func TestRichMovieDetailShape(t *testing.T) {
 			if item.AudienceRatingImage != "themoviedb://image.rating" {
 				t.Errorf("audienceRatingImage = %q", item.AudienceRatingImage)
 			}
-			if item.Year != 2026 || item.OriginallyAvailableAt != "2026-10-01" || item.ContentRating != "NR" {
-				t.Errorf("release metadata = (%d, %q, %q)", item.Year, item.OriginallyAvailableAt, item.ContentRating)
+			if item.Year != 0 || item.OriginallyAvailableAt != "" || item.ContentRating != "" || item.Rating != 0 {
+				t.Errorf("real-PMS-absent detail fields were populated: %#v", item)
 			}
 			if item.LibrarySectionID != 1 || item.LibrarySectionKey != "/library/sections/1" || item.LibrarySectionTitle != libraryName {
 				t.Errorf("library section metadata = (%d, %q, %q)", item.LibrarySectionID, item.LibrarySectionKey, item.LibrarySectionTitle)
+			}
+			if item.LibrarySectionUUID != "" || item.OriginalTitle != "" || item.TitleSort != "" {
+				t.Errorf("real-PMS-absent detail identity fields were populated: %#v", item)
 			}
 			if item.Extras == nil || item.Extras.Size != 0 {
 				t.Errorf("Extras = %#v", item.Extras)
@@ -189,6 +192,272 @@ func TestRichMovieDetailShape(t *testing.T) {
 			coreSemantics(t, container)
 		})
 	}
+}
+
+func jsonKind(value any) string {
+	switch value := value.(type) {
+	case bool:
+		return "boolean"
+	case string:
+		return "string"
+	case json.Number:
+		if strings.ContainsAny(value.String(), ".eE") {
+			return "decimal"
+		}
+		return "integer"
+	case []any:
+		return "array"
+	case map[string]any:
+		return "object"
+	case nil:
+		return "null"
+	default:
+		return "unexpected"
+	}
+}
+
+func decodeStrictJSON(t *testing.T, body []byte) map[string]any {
+	t.Helper()
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	var document map[string]any
+	if err := decoder.Decode(&document); err != nil {
+		t.Fatalf("decode strict JSON: %v", err)
+	}
+	return document
+}
+
+func requireObject(t *testing.T, value any, path string) map[string]any {
+	t.Helper()
+	object, ok := value.(map[string]any)
+	if !ok {
+		t.Fatalf("%s type = %s, want object", path, jsonKind(value))
+	}
+	return object
+}
+
+func requireArray(t *testing.T, value any, path string, length int) []any {
+	t.Helper()
+	array, ok := value.([]any)
+	if !ok {
+		t.Fatalf("%s type = %s, want array", path, jsonKind(value))
+	}
+	if len(array) != length {
+		t.Fatalf("%s length = %d, want %d", path, len(array), length)
+	}
+	return array
+}
+
+func assertObjectShape(t *testing.T, object map[string]any, path string, expected map[string]string) {
+	t.Helper()
+	actualKeys := make(map[string]bool, len(object))
+	for key := range object {
+		actualKeys[key] = true
+	}
+	expectedKeys := make(map[string]bool, len(expected))
+	for key := range expected {
+		expectedKeys[key] = true
+	}
+	if !reflect.DeepEqual(actualKeys, expectedKeys) {
+		t.Errorf("%s keys differ\nactual:   %#v\nexpected: %#v", path, actualKeys, expectedKeys)
+	}
+	for key, expectedKind := range expected {
+		value, ok := object[key]
+		if !ok {
+			continue
+		}
+		if got := jsonKind(value); got != expectedKind {
+			t.Errorf("%s.%s type = %s, want %s (value %#v)", path, key, got, expectedKind, value)
+		}
+	}
+}
+
+func assertCommonPresentationShape(t *testing.T, item map[string]any, detail bool) {
+	t.Helper()
+	images := requireArray(t, item["Image"], "Metadata[0].Image", 2)
+	for index, value := range images {
+		assertObjectShape(t, requireObject(t, value, "Image"), "Metadata[0].Image", map[string]string{
+			"alt": "string", "type": "string", "url": "string",
+		})
+		_ = index
+	}
+	assertObjectShape(t, requireObject(t, item["UltraBlurColors"], "Metadata[0].UltraBlurColors"), "Metadata[0].UltraBlurColors", map[string]string{
+		"topLeft": "string", "topRight": "string", "bottomRight": "string", "bottomLeft": "string",
+	})
+
+	mediaArray := requireArray(t, item["Media"], "Metadata[0].Media", 1)
+	mediaObject := requireObject(t, mediaArray[0], "Metadata[0].Media[0]")
+	assertObjectShape(t, mediaObject, "Metadata[0].Media[0]", map[string]string{
+		"id": "integer", "duration": "integer", "bitrate": "integer", "width": "integer", "height": "integer",
+		"aspectRatio": "decimal", "audioChannels": "integer", "audioCodec": "string", "videoCodec": "string",
+		"videoResolution": "string", "container": "string", "videoFrameRate": "string", "optimizedForStreaming": "integer",
+		"has64bitOffsets": "boolean", "videoProfile": "string", "hasVoiceActivity": "boolean", "Part": "array",
+	})
+	parts := requireArray(t, mediaObject["Part"], "Metadata[0].Media[0].Part", 1)
+	partObject := requireObject(t, parts[0], "Metadata[0].Media[0].Part[0]")
+	partShape := map[string]string{
+		"id": "integer", "key": "string", "duration": "integer", "file": "string", "size": "integer",
+		"container": "string", "has64bitOffsets": "boolean", "optimizedForStreaming": "boolean", "videoProfile": "string",
+	}
+	if detail {
+		partShape["accessible"] = "boolean"
+		partShape["exists"] = "boolean"
+		partShape["Stream"] = "array"
+	}
+	assertObjectShape(t, partObject, "Metadata[0].Media[0].Part[0]", partShape)
+	if !detail {
+		return
+	}
+
+	streams := requireArray(t, partObject["Stream"], "Metadata[0].Media[0].Part[0].Stream", 2)
+	assertObjectShape(t, requireObject(t, streams[0], "Stream[0]"), "Stream[0]", map[string]string{
+		"id": "integer", "streamType": "integer", "default": "boolean", "codec": "string", "index": "integer",
+		"bitrate": "integer", "bitDepth": "integer", "chromaLocation": "string", "chromaSubsampling": "string",
+		"codedHeight": "integer", "codedWidth": "integer", "frameRate": "decimal", "hasScalingMatrix": "boolean",
+		"height": "integer", "level": "integer", "profile": "string", "refFrames": "integer", "scanType": "string",
+		"streamIdentifier": "string", "width": "integer", "displayTitle": "string", "extendedDisplayTitle": "string",
+	})
+	assertObjectShape(t, requireObject(t, streams[1], "Stream[1]"), "Stream[1]", map[string]string{
+		"id": "integer", "streamType": "integer", "selected": "boolean", "default": "boolean", "codec": "string",
+		"index": "integer", "channels": "integer", "bitrate": "integer", "samplingRate": "integer",
+		"streamIdentifier": "string", "displayTitle": "string", "extendedDisplayTitle": "string",
+	})
+}
+
+func TestStrictRealPMSJSONShapes(t *testing.T) {
+	t.Run("detail", func(t *testing.T) {
+		response := metadataResponseForURL(t, "/library/metadata/1001?checkFiles=1&includeExtras=1&includeOnDeck=1", "application/json")
+		document := decodeStrictJSON(t, response.Body.Bytes())
+		assertObjectShape(t, document, "$", map[string]string{"MediaContainer": "object"})
+		container := requireObject(t, document["MediaContainer"], "MediaContainer")
+		assertObjectShape(t, container, "MediaContainer", map[string]string{
+			"size": "integer", "allowSync": "boolean", "identifier": "string", "librarySectionID": "integer",
+			"librarySectionTitle": "string", "librarySectionUUID": "string", "mediaTagPrefix": "string",
+			"mediaTagVersion": "integer", "Metadata": "array",
+		})
+		items := requireArray(t, container["Metadata"], "MediaContainer.Metadata", 1)
+		item := requireObject(t, items[0], "MediaContainer.Metadata[0]")
+		assertObjectShape(t, item, "MediaContainer.Metadata[0]", map[string]string{
+			"ratingKey": "string", "key": "string", "guid": "string", "type": "string", "title": "string", "slug": "string",
+			"thumb": "string", "art": "string", "summary": "string", "duration": "integer", "addedAt": "integer",
+			"updatedAt": "integer", "librarySectionID": "integer", "librarySectionKey": "string",
+			"librarySectionTitle": "string", "audienceRating": "decimal", "audienceRatingImage": "string",
+			"Media": "array", "Image": "array", "UltraBlurColors": "object", "Guid": "array", "Rating": "array", "Extras": "object",
+		})
+		assertCommonPresentationShape(t, item, true)
+		guid := requireObject(t, requireArray(t, item["Guid"], "Metadata[0].Guid", 1)[0], "Metadata[0].Guid[0]")
+		assertObjectShape(t, guid, "Metadata[0].Guid[0]", map[string]string{"id": "string"})
+		rating := requireObject(t, requireArray(t, item["Rating"], "Metadata[0].Rating", 1)[0], "Metadata[0].Rating[0]")
+		assertObjectShape(t, rating, "Metadata[0].Rating[0]", map[string]string{"image": "string", "type": "string", "value": "decimal"})
+		assertObjectShape(t, requireObject(t, item["Extras"], "Metadata[0].Extras"), "Metadata[0].Extras", map[string]string{"size": "integer"})
+	})
+
+	t.Run("compact list", func(t *testing.T) {
+		response := httptest.NewRecorder()
+		writeMovieLibrary(response)
+		document := decodeStrictJSON(t, response.Body.Bytes())
+		assertObjectShape(t, document, "$", map[string]string{"MediaContainer": "object"})
+		container := requireObject(t, document["MediaContainer"], "MediaContainer")
+		assertObjectShape(t, container, "MediaContainer", map[string]string{
+			"size": "integer", "allowSync": "boolean", "identifier": "string", "librarySectionID": "integer",
+			"librarySectionTitle": "string", "librarySectionUUID": "string", "mediaTagPrefix": "string",
+			"mediaTagVersion": "integer", "art": "string", "thumb": "string", "title1": "string", "title2": "string",
+			"viewGroup": "string", "viewMode": "integer", "Metadata": "array",
+		})
+		items := requireArray(t, container["Metadata"], "MediaContainer.Metadata", 1)
+		item := requireObject(t, items[0], "MediaContainer.Metadata[0]")
+		assertObjectShape(t, item, "MediaContainer.Metadata[0]", map[string]string{
+			"ratingKey": "string", "key": "string", "guid": "string", "type": "string", "title": "string", "slug": "string",
+			"thumb": "string", "art": "string", "summary": "string", "duration": "integer", "addedAt": "integer",
+			"updatedAt": "integer", "audienceRating": "decimal", "audienceRatingImage": "string",
+			"Media": "array", "Image": "array", "UltraBlurColors": "object",
+		})
+		assertCommonPresentationShape(t, item, false)
+	})
+}
+
+func xmlAttributeNames(attributes []xml.Attr) map[string]bool {
+	names := make(map[string]bool, len(attributes))
+	for _, attribute := range attributes {
+		names[attribute.Name.Local] = true
+	}
+	return names
+}
+
+func assertXMLAttributeSet(t *testing.T, path string, attributes []xml.Attr, expected ...string) {
+	t.Helper()
+	want := make(map[string]bool, len(expected))
+	for _, name := range expected {
+		want[name] = true
+	}
+	if got := xmlAttributeNames(attributes); !reflect.DeepEqual(got, want) {
+		t.Errorf("%s attributes differ\nactual:   %#v\nexpected: %#v", path, got, want)
+	}
+}
+
+type structuralXMLNode struct {
+	XMLName  xml.Name
+	Attrs    []xml.Attr          `xml:",any,attr"`
+	Children []structuralXMLNode `xml:",any"`
+}
+
+func TestStrictRealPMSDetailXMLShape(t *testing.T) {
+	response := metadataResponseForURL(t, "/library/metadata/1001?checkFiles=1&includeExtras=1&includeOnDeck=1", "application/xml")
+	var root structuralXMLNode
+	if err := xml.Unmarshal(response.Body.Bytes(), &root); err != nil {
+		t.Fatalf("decode XML: %v", err)
+	}
+	assertXMLAttributeSet(t, "MediaContainer", root.Attrs, "size", "allowSync", "identifier", "librarySectionID", "librarySectionTitle", "librarySectionUUID", "mediaTagPrefix", "mediaTagVersion")
+	if len(root.Children) != 1 || root.Children[0].XMLName.Local != "Video" {
+		t.Fatalf("MediaContainer children = %#v", root.Children)
+	}
+	video := root.Children[0]
+	assertXMLAttributeSet(t, "Video", video.Attrs, "ratingKey", "key", "guid", "type", "title", "slug", "thumb", "art", "summary", "duration", "addedAt", "updatedAt", "librarySectionID", "librarySectionKey", "librarySectionTitle", "audienceRating", "audienceRatingImage")
+	wantChildren := []string{"Media", "Image", "Image", "UltraBlurColors", "Guid", "Rating", "Extras"}
+	gotChildren := make([]string, len(video.Children))
+	for index, child := range video.Children {
+		gotChildren[index] = child.XMLName.Local
+	}
+	if !reflect.DeepEqual(gotChildren, wantChildren) {
+		t.Errorf("Video child order/shape = %#v, want %#v", gotChildren, wantChildren)
+	}
+	if len(video.Children) != len(wantChildren) {
+		return
+	}
+	mediaNode := video.Children[0]
+	assertXMLAttributeSet(t, "Media", mediaNode.Attrs, "id", "duration", "bitrate", "width", "height", "aspectRatio", "audioChannels", "audioCodec", "videoCodec", "videoResolution", "container", "videoFrameRate", "optimizedForStreaming", "has64bitOffsets", "videoProfile", "hasVoiceActivity")
+	if len(mediaNode.Children) != 1 || mediaNode.Children[0].XMLName.Local != "Part" {
+		t.Fatalf("Media children = %#v", mediaNode.Children)
+	}
+	partNode := mediaNode.Children[0]
+	assertXMLAttributeSet(t, "Part", partNode.Attrs, "accessible", "exists", "id", "key", "duration", "file", "size", "container", "has64bitOffsets", "optimizedForStreaming", "videoProfile")
+	if len(partNode.Children) != 2 || partNode.Children[0].XMLName.Local != "Stream" || partNode.Children[1].XMLName.Local != "Stream" {
+		t.Fatalf("Part children = %#v", partNode.Children)
+	}
+	assertXMLAttributeSet(t, "Video Stream", partNode.Children[0].Attrs, "id", "streamType", "default", "codec", "index", "bitrate", "bitDepth", "chromaLocation", "chromaSubsampling", "codedHeight", "codedWidth", "frameRate", "hasScalingMatrix", "height", "level", "profile", "refFrames", "scanType", "streamIdentifier", "width", "displayTitle", "extendedDisplayTitle")
+	assertXMLAttributeSet(t, "Audio Stream", partNode.Children[1].Attrs, "id", "streamType", "selected", "default", "codec", "index", "channels", "bitrate", "samplingRate", "streamIdentifier", "displayTitle", "extendedDisplayTitle")
+	assertXMLAttributeSet(t, "Image[0]", video.Children[1].Attrs, "alt", "type", "url")
+	assertXMLAttributeSet(t, "Image[1]", video.Children[2].Attrs, "alt", "type", "url")
+	assertXMLAttributeSet(t, "UltraBlurColors", video.Children[3].Attrs, "topLeft", "topRight", "bottomRight", "bottomLeft")
+	assertXMLAttributeSet(t, "Guid", video.Children[4].Attrs, "id")
+	assertXMLAttributeSet(t, "Rating", video.Children[5].Attrs, "image", "type", "value")
+	assertXMLAttributeSet(t, "Extras", video.Children[6].Attrs, "size")
+
+	if got := attributeValue(video.Attrs, "audienceRating"); got != "8.0" {
+		t.Errorf("XML audienceRating = %q, want 8.0", got)
+	}
+	if got := attributeValue(video.Children[5].Attrs, "value"); got != "8.0" {
+		t.Errorf("XML Rating value = %q, want 8.0", got)
+	}
+}
+
+func attributeValue(attributes []xml.Attr, name string) string {
+	for _, attribute := range attributes {
+		if attribute.Name.Local == name {
+			return attribute.Value
+		}
+	}
+	return ""
 }
 
 func TestMovieListAndDetailProjectionsDifferLikePMS(t *testing.T) {
