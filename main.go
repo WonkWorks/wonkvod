@@ -798,6 +798,11 @@ func handlerForPMSMode(mode, upstream string, synthetic http.Handler) (http.Hand
 			upstream = defaultPMSUpstream
 		}
 		return pmsPassthroughProviderBisectHandler(upstream, testFile, os.Getenv("WONKVOD_PROVIDER_VARIANT"))
+	case "real-catalog":
+		if strings.TrimSpace(upstream) == "" {
+			upstream = defaultPMSUpstream
+		}
+		return newRealCatalogHandler(upstream)
 	default:
 		return nil, fmt.Errorf("unsupported WONKVOD_PMS_MODE %q", mode)
 	}

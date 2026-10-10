@@ -5,6 +5,7 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
+COPY internal ./internal
 COPY fixtures ./fixtures
 ARG VCS_REF=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/wonkvod .

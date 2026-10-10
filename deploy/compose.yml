@@ -17,16 +17,25 @@ services:
     cap_drop:
       - ALL
     pids_limit: 128
+    env_file:
+      - /opt/wonkvod-runtime/xtream.env
     environment:
-      WONKVOD_PMS_MODE: "${WONKVOD_PMS_MODE:-synthetic}"
+      WONKVOD_PMS_MODE: "${WONKVOD_PMS_MODE:-real-catalog}"
       WONKVOD_PROVIDER_VARIANT: "${WONKVOD_PROVIDER_VARIANT:-real}"
       WONKVOD_PROVIDER_FEATURE_VARIANT: "${WONKVOD_PROVIDER_FEATURE_VARIANT:-real}"
       WONKVOD_PMS_UPSTREAM: "http://plex-identity:32400"
+      WONKVOD_CATALOG_STATE: "/var/lib/wonkvod/catalog.json"
     volumes:
       - type: bind
         source: /opt/plex-identity/test2.mp4
         target: /opt/plex-identity/test2.mp4
         read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /opt/wonkvod-runtime/state
+        target: /var/lib/wonkvod
+        read_only: false
         bind:
           create_host_path: false
     healthcheck:
