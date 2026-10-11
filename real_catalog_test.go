@@ -9,14 +9,9 @@ import (
 )
 
 func TestRealTVCategoryTargets(t *testing.T) {
-	want := []catalogCategory{{ID: "887", Name: "BET"}, {ID: "926", Name: "A&E"}}
+	want := []catalogCategory{{ID: "887", Name: "BET"}, {ID: "926", Name: "A&E"}, {ID: "779", Name: "REALITY"}}
 	if !reflect.DeepEqual(realTVCategoryTargets, want) {
 		t.Fatalf("TV category targets=%#v want=%#v", realTVCategoryTargets, want)
-	}
-	for _, target := range realTVCategoryTargets {
-		if target.ID == "779" || target.Name == "REALITY" {
-			t.Fatalf("REALITY unexpectedly enabled: %#v", target)
-		}
 	}
 }
 
@@ -36,7 +31,7 @@ func TestSnapshotTVCategoriesSupportsLegacyAndExpandedSnapshots(t *testing.T) {
 	if got := snapshotTVCategories(legacy); !reflect.DeepEqual(got, []catalogCategory{legacy.TVCategory}) {
 		t.Fatalf("legacy categories=%#v", got)
 	}
-	expanded := canonicalSnapshot{TVCategory: legacy.TVCategory, TVCategories: []catalogCategory{{ID: "887", Name: "BET", Count: 34}, {ID: "926", Name: "A&E", Count: 10}}}
+	expanded := canonicalSnapshot{TVCategory: legacy.TVCategory, TVCategories: []catalogCategory{{ID: "887", Name: "BET", Count: 34}, {ID: "926", Name: "A&E", Count: 10}, {ID: "779", Name: "REALITY", Count: 5}}}
 	if got := snapshotTVCategories(expanded); !reflect.DeepEqual(got, expanded.TVCategories) {
 		t.Fatalf("expanded categories=%#v", got)
 	}
@@ -54,6 +49,7 @@ func TestMergeMediaFactsAcrossExpandedTVCategories(t *testing.T) {
 		Shows: []canonicalShow{
 			{SourceID: "bet-show", Category: catalogCategory{ID: "887", Name: "BET"}, Seasons: []canonicalSeason{{Number: 1, Episodes: []canonicalEpisode{{SourceID: "episode-1"}}}}},
 			{SourceID: "ae-show", Category: catalogCategory{ID: "926", Name: "A&E"}, Seasons: []canonicalSeason{{Number: 1, Episodes: []canonicalEpisode{{SourceID: "episode-new"}}}}},
+			{SourceID: "reality-show", Category: catalogCategory{ID: "779", Name: "REALITY"}, Seasons: []canonicalSeason{{Number: 1, Episodes: []canonicalEpisode{{SourceID: "episode-reality"}}}}},
 		},
 	}
 	mergeMediaFacts(&next, previous)
@@ -62,5 +58,8 @@ func TestMergeMediaFactsAcrossExpandedTVCategories(t *testing.T) {
 	}
 	if next.Shows[1].Seasons[0].Episodes[0].MediaFacts.State != "" {
 		t.Fatal("new A&E episode unexpectedly acquired MediaFacts")
+	}
+	if next.Shows[2].Seasons[0].Episodes[0].MediaFacts.State != "" {
+		t.Fatal("new REALITY episode unexpectedly acquired MediaFacts")
 	}
 }

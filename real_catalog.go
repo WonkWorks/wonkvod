@@ -40,6 +40,7 @@ const (
 var realTVCategoryTargets = []catalogCategory{
 	{ID: "887", Name: realTVCategoryName},
 	{ID: "926", Name: "A&E"},
+	{ID: "779", Name: "REALITY"},
 }
 
 type catalogCategory struct {
@@ -191,6 +192,8 @@ func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {
 }
 
 func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
+	refreshStarted := time.Now()
+	topLevelStarted := refreshStarted
 	movieCategories, err := c.client.VODCategories(ctx)
 	if err != nil {
 		return canonicalSnapshot{}, err
@@ -239,7 +242,9 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 	// Retain the original primary field so a newly written snapshot remains
 	// readable by the previous single-category binary during rollback.
 	result.TVCategory = result.TVCategories[0]
+	log.Printf("real catalog refresh timing phase=top_level duration_ms=%d movies=%d shows=%d tv_categories=%d", time.Since(topLevelStarted).Milliseconds(), len(movieItems), len(showItems), len(result.TVCategories))
 
+	movieDetailsStarted := time.Now()
 	type movieResult struct {
 		movie canonicalMovie
 		q     *quarantineEntry
@@ -289,7 +294,9 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 			result.Movies = append(result.Movies, item.movie)
 		}
 	}
+	log.Printf("real catalog refresh timing phase=movie_details duration_ms=%d accepted=%d quarantine=%d", time.Since(movieDetailsStarted).Milliseconds(), len(result.Movies), len(result.Quarantine))
 
+	tvDetailsStarted := time.Now()
 	type showResult struct {
 		show       canonicalShow
 		q          *quarantineEntry
@@ -376,6 +383,8 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 	if err := validateStableIDs(result); err != nil {
 		return canonicalSnapshot{}, err
 	}
+	log.Printf("real catalog refresh timing phase=tv_details duration_ms=%d accepted=%d quarantine_total=%d", time.Since(tvDetailsStarted).Milliseconds(), len(result.Shows), len(result.Quarantine))
+	log.Printf("real catalog refresh timing phase=total duration_ms=%d", time.Since(refreshStarted).Milliseconds())
 	return result, nil
 }
 
