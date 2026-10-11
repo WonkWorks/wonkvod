@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -87,6 +88,48 @@ func TestFetchMergesMultiCategoryMembership(t *testing.T) {
 		t.Fatalf("overlap status=%#v", status)
 	}
 	_ = handler
+}
+
+func TestFetchHonorsConfiguredDetailConcurrency(t *testing.T) {
+	var active, maximum atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Query().Get("action") {
+		case "get_vod_categories":
+			_, _ = w.Write([]byte(`[{"category_id":"m","category_name":"Movies"}]`))
+		case "get_series_categories":
+			_, _ = w.Write([]byte(`[{"category_id":"t","category_name":"TV"}]`))
+		case "get_vod_streams":
+			_, _ = w.Write([]byte(`[{"stream_id":"1","name":"One","category_id":"m"},{"stream_id":"2","name":"Two","category_id":"m"},{"stream_id":"3","name":"Three","category_id":"m"},{"stream_id":"4","name":"Four","category_id":"m"},{"stream_id":"5","name":"Five","category_id":"m"},{"stream_id":"6","name":"Six","category_id":"m"}]`))
+		case "get_series":
+			_, _ = w.Write([]byte(`[]`))
+		case "get_vod_info":
+			current := active.Add(1)
+			for {
+				observed := maximum.Load()
+				if current <= observed || maximum.CompareAndSwap(observed, current) {
+					break
+				}
+			}
+			time.Sleep(20 * time.Millisecond)
+			active.Add(-1)
+			id := r.URL.Query().Get("vod_id")
+			_, _ = w.Write([]byte(`{"info":{"name":"Movie ` + id + `"},"movie_data":{"stream_id":"` + id + `","container_extension":"mkv"}}`))
+		default:
+			http.Error(w, "unexpected action", http.StatusBadRequest)
+		}
+	}))
+	defer provider.Close()
+	config := bootstrapConfig()
+	config.Provider = providerConfig{BaseURL: provider.URL, Username: "user", Password: "secret"}
+	config.Libraries = librariesConfig{MovieCategoryIDs: []string{"m"}, TVCategoryIDs: []string{"t"}}
+	config.Catalog.RefreshConcurrency = 2
+	if _, _, err := (&catalogRuntime{}).fetch(context.Background(), config); err != nil {
+		t.Fatal(err)
+	}
+	if got := maximum.Load(); got != 2 {
+		t.Fatalf("maximum concurrent detail requests = %d, want 2", got)
+	}
 }
 
 func TestLegacySnapshotLoadsSingleMembership(t *testing.T) {

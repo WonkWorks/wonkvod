@@ -48,8 +48,20 @@ type plexStatusResponse struct {
 	TLSStatus         string `json:"tls_status"`
 	CloudPresence     string `json:"cloud_presence"`
 	BackendStatus     string `json:"backend_status"`
+	SetupState        string `json:"setup_state"`
+	Ready             bool   `json:"ready"`
+	SetupMode         string `json:"setup_mode"`
+	ControlLibraries  string `json:"control_libraries"`
+	SetupActions      bool   `json:"setup_actions_available"`
 	Error             string `json:"error,omitempty"`
 }
+
+const (
+	plexSetupWaitingForIdentity = "waiting_for_identity"
+	plexSetupUnclaimed          = "unclaimed"
+	plexSetupCertificatePending = "certificate_pending"
+	plexSetupReady              = "ready"
+)
 
 func (h *realCatalogHandler) SetupHandler() http.Handler {
 	mux := http.NewServeMux()
@@ -77,6 +89,7 @@ func (h *realCatalogHandler) SetupHandler() http.Handler {
 	mux.HandleFunc("PUT /api/config/libraries", h.apiLibrariesConfig)
 	mux.HandleFunc("PUT /api/config/catalog", h.apiCatalogConfig)
 	mux.HandleFunc("GET /api/plex/status", h.apiPlexStatus)
+	mux.HandleFunc("GET /api/plex/setup", h.apiPlexStatus)
 	return setupAccessMiddleware(mux)
 }
 
@@ -330,7 +343,7 @@ func (h *realCatalogHandler) apiCatalogConfig(w http.ResponseWriter, r *http.Req
 }
 
 func (h *realCatalogHandler) plexStatus(ctx context.Context) plexStatusResponse {
-	result := plexStatusResponse{MachineIdentifier: machineID, SecureURI: strings.TrimSpace(getenvDefault("WONKVOD_SECURE_URI", "https://192-0-2-22.fixture.example.invalid:32499")), TLSStatus: "unknown", CloudPresence: "not_available", BackendStatus: "healthy"}
+	result := plexStatusResponse{MachineIdentifier: machineID, SecureURI: strings.TrimSpace(getenvDefault("WONKVOD_SECURE_URI", "https://192-0-2-22.fixture.example.invalid:32499")), TLSStatus: "unknown", CloudPresence: "not_available", BackendStatus: "healthy", SetupMode: "externally_managed_sidecar", ControlLibraries: "manual_verification_required"}
 	requestCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
 	defer cancel()
 	request, _ := http.NewRequestWithContext(requestCtx, http.MethodGet, strings.TrimRight(h.upstreamURL, "/")+"/identity", nil)
@@ -365,7 +378,37 @@ func (h *realCatalogHandler) plexStatus(ctx context.Context) plexStatusResponse 
 			}
 		}
 	}
+	result.SetupState, result.Ready = plexSetupState(result)
 	return result
+}
+
+func plexSetupState(status plexStatusResponse) (string, bool) {
+	if !status.IdentityReachable {
+		return plexSetupWaitingForIdentity, false
+	}
+	if !plexClaimed(status.Claimed) {
+		return plexSetupUnclaimed, false
+	}
+	if strings.TrimSpace(status.MachineIdentifier) == "" {
+		return plexSetupWaitingForIdentity, false
+	}
+	if status.TLSStatus != "valid" {
+		return plexSetupCertificatePending, false
+	}
+	return plexSetupReady, true
+}
+
+func plexClaimed(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case float64:
+		return typed != 0
+	case string:
+		return typed == "1" || strings.EqualFold(typed, "true")
+	default:
+		return false
+	}
 }
 
 func (h *realCatalogHandler) apiPlexStatus(w http.ResponseWriter, r *http.Request) {
@@ -408,10 +451,10 @@ async function overview(){clearTimeout(overviewTimer);let s=await api('/api/setu
 let state='';if(c.refresh_running)state=notice('running','Refreshing catalog…','Elapsed '+duration(elapsed)+'. Your current catalog remains available while refresh runs.');else if(c.last_refresh_result==='failed')state=notice('error','Refresh failed.','Your previous catalog is still active. '+(c.last_refresh_error||''));else if(c.last_refresh_result==='success'){let deltas=refreshBaseline?['movies','shows','seasons','episodes'].map(k=>countDelta(c,refreshBaseline,k)).filter(Boolean).join(' · '):'';state=notice('success','Refresh complete in '+duration(c.last_refresh_duration_ms)+'.',deltas)}
 app.innerHTML='<h1>Overview</h1><div class="grid">'+[['Movies',c.movies],['Shows',c.shows],['Seasons',c.seasons],['Episodes',c.episodes]].map(x=>'<div class="card"><div class="metric">'+x[1]+'</div>'+x[0]+'</div>').join('')+'</div>'+state+'<div class="card"><h2>Catalog</h2><p>Last success: '+fmt(c.last_successful_refresh)+' · Duration: '+duration(c.last_refresh_duration_ms)+'</p><p>Next refresh: '+fmt(c.next_scheduled_refresh)+'</p><button id="refresh" '+(c.refresh_running?'disabled':'')+'>'+(c.refresh_running?'<span class="spinner"></span>Refreshing…':'Refresh Now')+'</button></div><div class="card">Provider: '+esc(s.provider.status)+' · Plex identity: '+(s.plex.identity_reachable?'reachable':'unavailable')+'</div>';
 document.querySelector('#refresh').onclick=async e=>{let b=e.currentTarget;b.disabled=true;b.innerHTML='<span class="spinner"></span>Starting…';refreshBaseline={movies:c.movies,shows:c.shows,seasons:c.seasons,episodes:c.episodes};try{await api('/api/catalog/refresh',{method:'POST'});await overview()}catch(err){app.insertAdjacentHTML('afterbegin',notice('error','Refresh could not start.',err.message));b.disabled=false;b.textContent='Refresh Now'}};if(c.refresh_running)overviewTimer=setTimeout(overview,3000)}
-async function plex(){let p=await api('/api/plex/status');app.innerHTML='<h1>Plex</h1><div class="card"><p>Identity: '+(p.identity_reachable?'Reachable':'Unavailable')+'</p><p>Machine: '+esc(p.machine_identifier)+'</p><p>Claimed: '+esc(p.claimed??'Unknown')+'</p><p>Secure URI: '+esc(p.secure_uri)+'</p><p>TLS: '+esc(p.tls_status)+'</p><p>Cloud presence: '+esc(p.cloud_presence)+'</p><p>Backend: '+esc(p.backend_status)+'</p></div>'}
+async function plex(){let p=await api('/api/plex/setup'),ready=p.ready?notice('success','Ready','The claimed Plex identity and secure endpoint are ready.'):notice('warning','Plex setup needs attention.','Current state: '+p.setup_state.replaceAll('_',' '));app.innerHTML='<h1>Plex</h1>'+ready+'<div class="card"><p>Setup mode: '+esc(p.setup_mode)+'</p><p>Identity: '+(p.identity_reachable?'Reachable':'Unavailable')+'</p><p>Machine: '+esc(p.machine_identifier)+'</p><p>Claimed: '+esc(p.claimed??'Unknown')+'</p><p>Secure URI: '+esc(p.secure_uri)+'</p><p>TLS: '+esc(p.tls_status)+'</p><p>Cloud presence: '+esc(p.cloud_presence)+'</p><p>Control libraries: '+esc(p.control_libraries)+'</p><p>Backend: '+esc(p.backend_status)+'</p></div><div class="card"><h2>Setup actions</h2><p class="muted">This installation uses an externally managed identity sidecar. Destructive setup actions are intentionally unavailable. Claiming, cloud registration, and control-library permissions remain manual.</p></div>'}
 async function provider(){let c=await api('/api/config'),p=c.provider;app.innerHTML='<h1>Provider</h1><div class="card"><label>Server URL<input id="url" value="'+esc(p.base_url)+'"></label><label>Username<input id="user" value="'+esc(p.username)+'"></label><label>Password<input id="pass" type="password" value="" placeholder="'+(p.password_configured?'Configured — leave blank to keep':'Required')+'"></label><div class="actions"><button id="test">Test Connection</button><button id="save">Save</button></div><div id="result"></div></div>';let body=()=>({base_url:url.value,username:user.value,...(pass.value?{password:pass.value}:{})}),run=async(button,label,fn)=>{button.disabled=true;button.innerHTML='<span class="spinner"></span>'+label;result.innerHTML='';try{await fn();result.innerHTML=notice('success',label==='Testing…'?'Connected.':'Provider settings saved.')}catch(e){result.innerHTML=notice('error',label==='Testing…'?'Connection failed.':'Save failed.',e.message)}finally{button.disabled=false;button.textContent=label==='Testing…'?'Test Connection':'Save'}};test.onclick=()=>run(test,'Testing…',()=>api('/api/provider/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())}));save.onclick=()=>run(save,'Saving…',async()=>{await api('/api/config/provider',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(body())});pass.value=''})}
 async function categories(){let c=await api('/api/provider/categories');let group=(name,x,k)=>'<div class="card"><h2>'+name+'</h2>'+x.map(v=>'<label class="option"><input type="checkbox" data-kind="'+k+'" value="'+esc(v.id)+'" '+(v.selected?'checked':'')+'>'+esc(v.name)+' <span class="muted">('+esc(v.id)+')</span></label>').join('')+'</div>';app.innerHTML='<h1>Categories</h1>'+group('Movie Categories',c.movies,'movie')+group('TV Categories',c.tv,'tv')+'<div class="actions"><button id="apply">Apply Categories</button><button id="category-refresh" hidden>Refresh Now</button></div><div id="result"></div>';let ids=k=>[...document.querySelectorAll('[data-kind="'+k+'"]:checked')].map(x=>x.value);apply.onclick=async()=>{apply.disabled=true;apply.innerHTML='<span class="spinner"></span>Saving…';result.innerHTML='';try{await api('/api/config/libraries',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({movie_category_ids:ids('movie'),tv_category_ids:ids('tv')})});result.innerHTML=notice('success','Categories saved.','A catalog refresh is required before these changes appear in Plex.');document.querySelector('#category-refresh').hidden=false;apply.textContent='Saved'}catch(e){result.innerHTML=notice('error','Categories were not saved.',e.message);apply.textContent='Apply Categories'}finally{apply.disabled=false}};document.querySelector('#category-refresh').onclick=async e=>{let b=e.currentTarget;b.disabled=true;b.innerHTML='<span class="spinner"></span>Starting…';try{await api('/api/catalog/refresh',{method:'POST'});result.innerHTML=notice('running','Refreshing catalog…','Your current catalog remains available. Follow progress on Overview.');b.textContent='Refreshing…'}catch(err){result.innerHTML=notice('error','Refresh could not start.',err.message);b.disabled=false;b.textContent='Refresh Now'}}}
-async function settings(){let c=await api('/api/config');app.innerHTML='<h1>Settings</h1><div class="card"><label>Catalog refresh interval<select id="interval">'+['1h0m0s','3h0m0s','6h0m0s','12h0m0s','24h0m0s'].map(v=>'<option '+(v===c.catalog.refresh_interval?'selected':'')+'>'+v+'</option>').join('')+'</select></label><button id="save">Save</button><div id="result"></div></div>';save.onclick=async()=>{save.disabled=true;save.innerHTML='<span class="spinner"></span>Saving…';result.innerHTML='';try{await api('/api/config/catalog',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_interval:interval.value})});result.innerHTML=notice('success','Settings saved.','The next scheduled refresh has been recalculated.');save.textContent='Saved'}catch(e){result.innerHTML=notice('error','Settings were not saved.',e.message);save.textContent='Save'}finally{save.disabled=false}}}
+async function settings(){let c=await api('/api/config');app.innerHTML='<h1>Settings</h1><div class="card"><h2>Catalog</h2><label>Catalog refresh interval<select id="interval">'+['1h0m0s','3h0m0s','6h0m0s','12h0m0s','24h0m0s'].map(v=>'<option '+(v===c.catalog.refresh_interval?'selected':'')+'>'+v+'</option>').join('')+'</select></label><label>Catalog refresh concurrency<select id="concurrency">'+[1,2,4,6,8,10].map(v=>'<option value="'+v+'" '+(v===c.catalog.refresh_concurrency?'selected':'')+'>'+v+'</option>').join('')+'</select></label><p class="muted">Controls simultaneous provider metadata requests during catalog refresh. Lower values are friendlier to providers. This does not control simultaneous video playback.</p><button id="save">Save</button><div id="result"></div></div>';save.onclick=async()=>{save.disabled=true;save.innerHTML='<span class="spinner"></span>Saving…';result.innerHTML='';try{await api('/api/config/catalog',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({refresh_interval:interval.value,refresh_concurrency:Number(concurrency.value)})});result.innerHTML=notice('success','Settings saved.','The next scheduled refresh has been recalculated. New refreshes will use the selected concurrency.');save.textContent='Saved'}catch(e){result.innerHTML=notice('error','Settings were not saved.',e.message);save.textContent='Save'}finally{save.disabled=false}}}
 (async()=>{try{if(page==='/')await overview();else if(page==='/plex')await plex();else if(page==='/provider')await provider();else if(page==='/categories')await categories();else await settings()}catch(e){app.innerHTML=notice('error','Unable to load this page.',e.message)}})();
 </script></body></html>`))
 

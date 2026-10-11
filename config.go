@@ -14,13 +14,16 @@ import (
 )
 
 const (
-	configVersion          = 1
-	defaultConfigStatePath = "/var/lib/wonkvod/config.json"
+	configVersion                    = 1
+	defaultConfigStatePath           = "/var/lib/wonkvod/config.json"
+	defaultCatalogRefreshConcurrency = 2
 )
 
 var allowedRefreshIntervals = []time.Duration{
 	time.Hour, 3 * time.Hour, 6 * time.Hour, 12 * time.Hour, 24 * time.Hour,
 }
+
+var allowedRefreshConcurrency = []int{1, 2, 4, 6, 8, 10}
 
 type providerConfig struct {
 	BaseURL  string `json:"base_url"`
@@ -34,7 +37,8 @@ type librariesConfig struct {
 }
 
 type catalogConfig struct {
-	RefreshInterval string `json:"refresh_interval"`
+	RefreshInterval    string `json:"refresh_interval"`
+	RefreshConcurrency int    `json:"refresh_concurrency"`
 }
 
 type appConfig struct {
@@ -77,7 +81,7 @@ func bootstrapConfig() appConfig {
 			MovieCategoryIDs: []string{"917"},
 			TVCategoryIDs:    []string{"887", "926", "779"},
 		},
-		Catalog: catalogConfig{RefreshInterval: defaultCatalogRefresh.String()},
+		Catalog: catalogConfig{RefreshInterval: defaultCatalogRefresh.String(), RefreshConcurrency: defaultCatalogRefreshConcurrency},
 	}
 }
 
@@ -114,12 +118,26 @@ func loadConfigStore(path string) (*configStore, error) {
 		store.loadErr = "persisted configuration is invalid JSON; bootstrap defaults are active"
 		return store, nil
 	}
+	migrated := normalizeAppConfig(&persisted)
 	if err := validateAppConfig(persisted, false); err != nil {
 		store.loadErr = "persisted configuration is invalid: " + sanitizeStatusError(err)
 		return store, nil
 	}
+	if migrated {
+		if err := saveAppConfig(path, persisted); err != nil {
+			return nil, fmt.Errorf("persist migrated configuration: %w", err)
+		}
+	}
 	store.config = persisted
 	return store, nil
+}
+
+func normalizeAppConfig(config *appConfig) bool {
+	if config.Catalog.RefreshConcurrency != 0 {
+		return false
+	}
+	config.Catalog.RefreshConcurrency = defaultCatalogRefreshConcurrency
+	return true
 }
 
 func validateAppConfig(config appConfig, allowIncompleteProvider bool) error {
@@ -144,6 +162,9 @@ func validateAppConfig(config appConfig, allowIncompleteProvider bool) error {
 	interval, err := time.ParseDuration(config.Catalog.RefreshInterval)
 	if err != nil || !slices.Contains(allowedRefreshIntervals, interval) {
 		return errors.New("refresh interval must be one of 1h, 3h, 6h, 12h, or 24h")
+	}
+	if !slices.Contains(allowedRefreshConcurrency, config.Catalog.RefreshConcurrency) {
+		return errors.New("refresh concurrency must be one of 1, 2, 4, 6, 8, or 10")
 	}
 	return nil
 }
@@ -242,6 +263,14 @@ func (s *configStore) refreshInterval() time.Duration {
 		return defaultCatalogRefresh
 	}
 	return interval
+}
+
+func (s *configStore) refreshConcurrency() int {
+	concurrency := s.snapshot().Catalog.RefreshConcurrency
+	if !slices.Contains(allowedRefreshConcurrency, concurrency) {
+		return defaultCatalogRefreshConcurrency
+	}
+	return concurrency
 }
 
 func sanitizeStatusError(err error) string {

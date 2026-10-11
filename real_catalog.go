@@ -28,9 +28,10 @@ const (
 	realTVCategoryName      = "BET"
 	defaultCatalogStatePath = "/var/lib/wonkvod/catalog.json"
 	defaultCatalogRefresh   = 6 * time.Hour
-	catalogRefreshTimeout   = 60 * time.Minute
-	providerRequestTimeout  = 90 * time.Second
-	providerDetailWorkers   = 10
+	// The deadline is a safety ceiling, not an expected duration. At the
+	// conservative default concurrency, large catalogs can take several hours.
+	catalogRefreshTimeout  = 6 * time.Hour
+	providerRequestTimeout = 90 * time.Second
 	// IDs occupy disjoint decimal ranges below JavaScript's exact-integer
 	// ceiling: 1=movie, 2=show, 3=season, 4=episode, 5=Media, 6=Part,
 	// 7=video Stream, and 8=audio Stream. The payload is a stable SHA-256
@@ -213,11 +214,12 @@ func (c *catalogRuntime) triggerRefresh(reason string) bool {
 func (c *catalogRuntime) runRefresh(reason string) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), catalogRefreshTimeout)
+	config := c.config.snapshot()
 	fetcher := c.fetcher
 	if fetcher == nil {
 		fetcher = c.fetch
 	}
-	next, client, err := fetcher(ctx, c.config.snapshot())
+	next, client, err := fetcher(ctx, config)
 	cancel()
 	if err == nil {
 		c.persistMu.Lock()
@@ -447,7 +449,7 @@ func (c *catalogRuntime) fetch(ctx context.Context, config appConfig) (canonical
 	movieResults := make(chan movieResult)
 	movieFailures := 0
 	var workers sync.WaitGroup
-	workerCount := providerDetailWorkers
+	workerCount := config.Catalog.RefreshConcurrency
 	if len(movieItems) < workerCount {
 		workerCount = len(movieItems)
 	}
@@ -509,7 +511,7 @@ func (c *catalogRuntime) fetch(ctx context.Context, config appConfig) (canonical
 	showResults := make(chan showResult)
 	showFailures := 0
 	workers = sync.WaitGroup{}
-	workerCount = providerDetailWorkers
+	workerCount = config.Catalog.RefreshConcurrency
 	if len(showItems) < workerCount {
 		workerCount = len(showItems)
 	}

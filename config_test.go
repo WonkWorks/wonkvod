@@ -20,6 +20,9 @@ func TestConfigBootstrapPersistenceAndSecretRedaction(t *testing.T) {
 	if got := store.snapshot().Libraries; len(got.MovieCategoryIDs) != 1 || got.MovieCategoryIDs[0] != "917" || strings.Join(got.TVCategoryIDs, ",") != "887,926,779" {
 		t.Fatalf("bootstrap categories = %#v", got)
 	}
+	if got := store.snapshot().Catalog.RefreshConcurrency; got != 2 {
+		t.Fatalf("bootstrap refresh concurrency = %d", got)
+	}
 	info, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
@@ -57,6 +60,45 @@ func TestConfigRejectsInvalidUpdateWithoutPromotion(t *testing.T) {
 	after, _ := os.ReadFile(path)
 	if string(before) != string(after) {
 		t.Fatal("invalid configuration was promoted")
+	}
+}
+
+func TestConfigMigratesMissingRefreshConcurrency(t *testing.T) {
+	t.Setenv("WONKVOD_XTREAM_URL", "https://provider.example")
+	t.Setenv("WONKVOD_XTREAM_USER", "viewer")
+	t.Setenv("WONKVOD_XTREAM_PASS", "secret")
+	path := filepath.Join(t.TempDir(), "config.json")
+	legacy := `{"version":1,"provider":{"base_url":"https://provider.example","username":"viewer","password":"secret"},"libraries":{"movie_category_ids":["917"],"tv_category_ids":["887"]},"catalog":{"refresh_interval":"6h0m0s"}}`
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := loadConfigStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := store.snapshot().Catalog.RefreshConcurrency; got != 2 {
+		t.Fatalf("migrated refresh concurrency = %d", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || !strings.Contains(string(data), `"refresh_concurrency": 2`) {
+		t.Fatalf("migration was not persisted: err=%v data=%s", err, data)
+	}
+}
+
+func TestConfigRejectsUnsupportedRefreshConcurrency(t *testing.T) {
+	config := bootstrapConfig()
+	config.Provider = providerConfig{BaseURL: "https://provider.example", Username: "user", Password: "secret"}
+	for _, value := range []int{-1, 0, 3, 5, 9, 11} {
+		config.Catalog.RefreshConcurrency = value
+		if err := validateAppConfig(config, false); err == nil {
+			t.Fatalf("refresh concurrency %d was accepted", value)
+		}
+	}
+	for _, value := range allowedRefreshConcurrency {
+		config.Catalog.RefreshConcurrency = value
+		if err := validateAppConfig(config, false); err != nil {
+			t.Fatalf("refresh concurrency %d rejected: %v", value, err)
+		}
 	}
 }
 

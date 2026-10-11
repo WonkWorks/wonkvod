@@ -17,6 +17,7 @@ import (
 
 func setupFixture(t *testing.T) (*realCatalogHandler, *catalogRuntime) {
 	t.Helper()
+	t.Setenv("WONKVOD_SECURE_URI", "https://127.0.0.1:1")
 	config := bootstrapConfig()
 	config.Provider = providerConfig{BaseURL: "https://provider.example", Username: "user", Password: "never-render-this"}
 	store := &configStore{path: filepath.Join(t.TempDir(), "config.json"), config: config}
@@ -59,6 +60,42 @@ func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	if !strings.Contains(plex.Body.String(), `"claimed":true`) {
 		t.Fatalf("Plex claimed status was not projected: %s", plex.Body.String())
 	}
+	if !strings.Contains(plex.Body.String(), `"setup_state":`) || !strings.Contains(plex.Body.String(), `"setup_actions_available":false`) {
+		t.Fatalf("Plex setup seam was not safely projected: %s", plex.Body.String())
+	}
+	setup := httptest.NewRecorder()
+	server.ServeHTTP(setup, httptest.NewRequest(http.MethodGet, "/api/plex/setup", nil))
+	if setup.Code != http.StatusOK || !strings.Contains(setup.Body.String(), `"setup_mode":"externally_managed_sidecar"`) {
+		t.Fatalf("Plex setup endpoint status=%d body=%s", setup.Code, setup.Body.String())
+	}
+	mutation := httptest.NewRecorder()
+	server.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/api/plex/setup", nil))
+	if mutation.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("Plex setup mutation unexpectedly available: %d", mutation.Code)
+	}
+}
+
+func TestPlexSetupStateTransitions(t *testing.T) {
+	tests := []struct {
+		name   string
+		status plexStatusResponse
+		state  string
+		ready  bool
+	}{
+		{"identity unavailable", plexStatusResponse{}, plexSetupWaitingForIdentity, false},
+		{"unclaimed", plexStatusResponse{IdentityReachable: true, Claimed: false}, plexSetupUnclaimed, false},
+		{"machine pending", plexStatusResponse{IdentityReachable: true, Claimed: true}, plexSetupWaitingForIdentity, false},
+		{"certificate pending", plexStatusResponse{IdentityReachable: true, Claimed: true, MachineIdentifier: "machine"}, plexSetupCertificatePending, false},
+		{"ready", plexStatusResponse{IdentityReachable: true, Claimed: "1", MachineIdentifier: "machine", TLSStatus: "valid"}, plexSetupReady, true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			state, ready := plexSetupState(test.status)
+			if state != test.state || ready != test.ready {
+				t.Fatalf("state=%q ready=%t, want %q/%t", state, ready, test.state, test.ready)
+			}
+		})
+	}
 }
 
 func TestSetupUIHardeningContract(t *testing.T) {
@@ -72,6 +109,8 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		`Refreshing catalog…`, `Your previous catalog is still active.`, `setTimeout(overview,3000)`,
 		`wonkvod-theme`, `<option value="system">System</option>`, `<option value="light">Light</option>`, `<option value="dark">Dark</option>`,
 		`wonkvodlogo_`, `wonkvodlogo_light.png`, `Connection failed.`, `Provider settings saved.`, `Settings saved.`,
+		`Catalog refresh concurrency`, `Lower values are friendlier to providers.`, `This does not control simultaneous video playback.`,
+		`The claimed Plex identity and secure endpoint are ready.`, `Destructive setup actions are intentionally unavailable.`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("setup UI missing %q", required)
