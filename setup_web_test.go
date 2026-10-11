@@ -37,7 +37,7 @@ func setupFixture(t *testing.T) (*realCatalogHandler, *catalogRuntime) {
 func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	handler, _ := setupFixture(t)
 	server := handler.SetupHandler()
-	for _, path := range []string{"/", "/plex", "/provider", "/categories", "/libraries", "/settings", "/assets/branding/wonkvodlogo_dark.png", "/assets/branding/wonkvodlogo_light.png"} {
+	for _, path := range []string{"/", "/plex", "/provider", "/categories", "/libraries", "/quarantine", "/settings", "/assets/branding/wonkvodlogo_dark.png", "/assets/branding/wonkvodlogo_light.png"} {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
@@ -72,6 +72,165 @@ func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	server.ServeHTTP(mutation, httptest.NewRequest(http.MethodPost, "/api/plex/setup", nil))
 	if mutation.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("Plex setup mutation unexpectedly available: %d", mutation.Code)
+	}
+}
+
+func TestQuarantineAPIIsBackwardCompatibleAndSanitized(t *testing.T) {
+	handler, runtime := setupFixture(t)
+	runtime.mu.Lock()
+	runtime.snapshot.Quarantine = []quarantineEntry{
+		{Kind: "movie", SourceID: "m1", Reason: "metadata request failed"},
+		{Kind: "show", SourceID: "s1", Title: "Show", Reason: "series traversal failed", ReasonClass: "http", HTTPStatus: 503},
+	}
+	runtime.mu.Unlock()
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/catalog/quarantine?X-Plex-Token=secret", nil))
+	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("unsafe quarantine response status=%d body=%s", response.Code, response.Body.String())
+	}
+	var got quarantineResponse
+	if err := json.Unmarshal(response.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Total != 2 || got.Movies != 1 || got.Shows != 1 || got.ReasonBuckets["legacy"] != 1 || !got.Items[0].Retryable {
+		t.Fatalf("quarantine response=%#v", got)
+	}
+}
+
+func TestQuarantineZeroStateAndThemeContract(t *testing.T) {
+	handler, runtime := setupFixture(t)
+	runtime.mu.Lock()
+	runtime.snapshot.Quarantine = nil
+	runtime.mu.Unlock()
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/quarantine", nil))
+	body := response.Body.String()
+	for _, required := range []string{"No quarantined items", "--header:#eef1f5", "--header:#0d1117", "background:var(--header)", "activeTheme()==='dark'?'dark':'light'"} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("UI missing %q", required)
+		}
+	}
+}
+
+func TestRefreshConcurrencyOverrideIsValidatedAndDoesNotPersist(t *testing.T) {
+	handler, runtime := setupFixture(t)
+	seen := make(chan int, 1)
+	block := make(chan struct{})
+	runtime.fetcher = func(_ context.Context, config appConfig) (canonicalSnapshot, *xtream.Client, error) {
+		seen <- config.Catalog.RefreshConcurrency
+		<-block
+		return runtime.snapshotCopy(), nil, nil
+	}
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":8}`)))
+	if response.Code != http.StatusAccepted || <-seen != 8 {
+		t.Fatalf("override response=%d body=%s", response.Code, response.Body.String())
+	}
+	if runtime.config.snapshot().Catalog.RefreshConcurrency != defaultCatalogRefreshConcurrency {
+		t.Fatal("one-time override persisted")
+	}
+	close(block)
+	deadline := time.Now().Add(time.Second)
+	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	invalid := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":3}`)))
+	if invalid.Code != http.StatusBadRequest {
+		t.Fatalf("invalid override status=%d", invalid.Code)
+	}
+	seen = make(chan int, 1)
+	runtime.fetcher = func(_ context.Context, config appConfig) (canonicalSnapshot, *xtream.Client, error) {
+		seen <- config.Catalog.RefreshConcurrency
+		return runtime.snapshotCopy(), nil, nil
+	}
+	if !runtime.triggerRefresh("scheduled") || <-seen != defaultCatalogRefreshConcurrency {
+		t.Fatal("scheduled refresh did not use persisted default")
+	}
+	deadline = time.Now().Add(time.Second)
+	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestCategoryImpactPreviewUsesOnlyBulkLists(t *testing.T) {
+	provider := newIncrementalProvider()
+	provider.movies["b"] = []string{"m1", "m2"}
+	provider.movieName["m2"], provider.movieRevision["m2"] = "Movie Two", "2"
+	server := httptest.NewServer(http.HandlerFunc(provider.handler))
+	defer server.Close()
+	config := incrementalConfig(server.URL, "a")
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json"), config: config}
+	runtime := &catalogRuntime{config: store, snapshot: canonicalSnapshot{Version: realCatalogVersion, Movies: []canonicalMovie{{SourceID: "m1", Category: catalogCategory{ID: "a", Name: "A"}, Categories: []canonical.Category{{ID: "a", Name: "A"}}}, {SourceID: "gone"}}, Shows: []canonicalShow{{SourceID: "s1", Category: catalogCategory{ID: "t", Name: "TV"}, Categories: []canonical.Category{{ID: "t", Name: "TV"}}}}}}
+	preview, err := runtime.previewCategoryImpact(t.Context(), librariesConfig{MovieCategoryIDs: []string{"b"}, TVCategoryIDs: []string{"t"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if preview.NewMovies != 1 || preview.RemovedMovies != 1 || preview.MembershipOnly != 1 || preview.ResultMovies != 2 {
+		t.Fatalf("preview=%#v", preview)
+	}
+	if preview.Warning || preview.SuggestedConcurrency != 0 {
+		t.Fatalf("small expansion warned excessively: %#v", preview)
+	}
+	if provider.movieDetails != 0 || provider.showDetails != 0 {
+		t.Fatalf("preview fetched details %d/%d", provider.movieDetails, provider.showDetails)
+	}
+}
+
+func TestCategoryExpansionGuidanceThreshold(t *testing.T) {
+	small := categoryImpactPreview{NewTopLevel: categoryExpansionWarningThreshold}
+	applyExpansionGuidance(&small)
+	if small.Warning || small.SuggestedConcurrency != 0 {
+		t.Fatalf("threshold should not warn: %#v", small)
+	}
+	large := categoryImpactPreview{NewTopLevel: 4000}
+	applyExpansionGuidance(&large)
+	if !large.Warning || large.SuggestedConcurrency != 10 {
+		t.Fatalf("large guidance=%#v", large)
+	}
+}
+
+func TestQuarantineItemRetryUsesAtomicRefreshAndSafeConcurrency(t *testing.T) {
+	provider := newIncrementalProvider()
+	server := httptest.NewServer(http.HandlerFunc(provider.handler))
+	defer server.Close()
+	config := incrementalConfig(server.URL, "a")
+	store := &configStore{path: filepath.Join(t.TempDir(), "config.json"), config: config}
+	runtime := &catalogRuntime{
+		config: store, statePath: filepath.Join(t.TempDir(), "catalog.json"), startedAt: time.Now(),
+		snapshot:     canonicalSnapshot{Version: realCatalogVersion, GeneratedAt: time.Now().UTC(), Quarantine: []quarantineEntry{{Kind: "movie", SourceID: "m1", Reason: "metadata request failed"}}},
+		scheduleWake: make(chan struct{}, 1), sources: map[string]*xtream.VODSource{}, capabilities: map[string]xtream.CapabilityProbe{},
+	}
+	runtime.status = catalogRefreshStatus{CatalogAvailable: true}
+	handler := &realCatalogHandler{catalog: runtime}
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
+	if response.Code != http.StatusAccepted || runtime.catalogStatus().Metrics.EffectiveConcurrency != 1 {
+		t.Fatalf("retry status=%d body=%s metrics=%#v", response.Code, response.Body.String(), runtime.catalogStatus().Metrics)
+	}
+	deadline := time.Now().Add(time.Second)
+	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := runtime.snapshotCopy(); len(got.Movies) != 1 || len(got.Quarantine) != 0 {
+		t.Fatalf("retry did not promote recovered item: %#v", got)
+	}
+
+	provider.movieRevision["m1"] = "changed"
+	provider.failMovies["m1"] = true
+	runtime.mu.Lock()
+	runtime.snapshot.Quarantine = []quarantineEntry{{Kind: "movie", SourceID: "m1", Reason: "metadata request failed"}}
+	beforeTitle := runtime.snapshot.Movies[0].Title
+	runtime.mu.Unlock()
+	failed := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(failed, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
+	deadline = time.Now().Add(time.Second)
+	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	got := runtime.snapshotCopy()
+	if len(got.Movies) != 1 || got.Movies[0].Title != beforeTitle || len(got.Quarantine) != 1 || got.Quarantine[0].LastRetryResult != "failed" {
+		t.Fatalf("failed retry damaged live item: %#v", got)
 	}
 }
 
@@ -117,7 +276,7 @@ func TestSetupUIHardeningContract(t *testing.T) {
 			t.Fatalf("setup UI missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{`href="/libraries">Libraries`, `<h1>Libraries</h1>`, `<pre id="result">`, `JSON.stringify(await api`} {
+	for _, forbidden := range []string{`href="/libraries">Libraries`, `<h1>Libraries</h1>`, `<pre id="result">`, `JSON.stringify(await api`, `.value=String(suggested)`} {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("setup UI retains raw/legacy surface %q", forbidden)
 		}
@@ -140,6 +299,10 @@ func TestCatalogRebuildEndpointIsExplicit(t *testing.T) {
 		t.Fatalf("rebuild mode=%q", got)
 	}
 	close(block)
+	deadline := time.Now().Add(time.Second)
+	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 }
 
 func TestScheduledAndStartupRefreshUseIncrementalMode(t *testing.T) {
@@ -158,6 +321,10 @@ func TestScheduledAndStartupRefreshUseIncrementalMode(t *testing.T) {
 				t.Fatalf("mode=%q", got)
 			}
 			close(block)
+			deadline := time.Now().Add(time.Second)
+			for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
 		})
 	}
 }

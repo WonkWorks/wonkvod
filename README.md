@@ -143,6 +143,13 @@ MediaFacts inspection, or simultaneous video playback. Lower settings are more
 provider-friendly. A change applies to the next refresh and does not resize a
 refresh already in progress.
 
+Refresh Now and Full Rebuild also offer a one-time concurrency override. The
+override is validated against the same values, applies only to that invocation,
+and never changes the saved default. The default of `2` is intentionally
+conservative. A large category bootstrap may reasonably use a higher temporary
+value, but more concurrency is not always better and can trigger provider
+limits.
+
 Web Setup does not return the saved password. Leaving the password blank during
 an update preserves the existing value. The UI currently has no authentication
 and must remain on a trusted LAN.
@@ -171,8 +178,12 @@ and must remain on a trusted LAN.
   with multiple memberships. It appears once globally and in every matching
   category filter; stable Plex IDs remain based on source identity.
 - Isolated items whose metadata cannot be normalized are quarantined rather
-  than blocking an otherwise healthy refresh. The Overview status reports the
-  quarantine count; normal refresh retries listed items in quarantine.
+  than blocking an otherwise healthy refresh. The **Quarantine** page reports
+  sanitized failure class, HTTP/transport state, category membership, failure
+  time, and retryability. Retry uses the normal atomic incremental build at
+  provider-safe concurrency `1`; it never edits `catalog.json` in place and a
+  failed retry leaves the live catalog intact. Older generic quarantine records
+  remain readable.
 - MediaFacts are inspected lazily when an item needs them and are merged into
   later catalog snapshots by stable source identity. Refresh does not probe the
   entire media catalog.
@@ -187,6 +198,16 @@ but they remain provider assertions rather than an independent content audit.
 Use the explicit Full Rebuild operation for occasional deep revalidation when
 provider behavior or metadata freshness is in doubt; WonkVOD does not schedule
 an expensive periodic rebuild implicitly.
+
+Before category selections are saved, **Preview Impact** uses only inexpensive
+bulk category lists to estimate new and removed movies/shows, membership-only
+changes, and overlaps. It performs no detail enrichment. More than 100 new
+top-level items is treated as a large expansion: the UI explains that a longer
+bootstrap is expected and suggests—but never automatically applies—a temporary
+concurrency value. Normal incremental refreshes should remain short when few or
+no detail requests are required; an unusually long steady-state run points to a
+provider or network issue. Full Rebuild is explicitly expensive because every
+selected item is re-fetched.
 
 ## Ports and paths
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	canonical "wonkvod/internal/catalog"
+	"wonkvod/internal/xtream"
 )
 
 type incrementalProvider struct {
@@ -185,6 +187,53 @@ func TestIncrementalRefreshRetriesQuarantineAndGuardsSystemicFailure(t *testing.
 	}
 	if _, _, _, err := runtime.fetchCatalog(t.Context(), config, next, false); err == nil {
 		t.Fatal("systemic detail failure was promotable")
+	}
+}
+
+func TestQuarantineFailureClassification(t *testing.T) {
+	provider := newIncrementalProvider()
+	provider.failMovies["m1"] = true
+	server := httptest.NewServer(http.HandlerFunc(provider.handler))
+	defer server.Close()
+	runtime := &catalogRuntime{}
+	next, _, _, err := runtime.fetchCatalog(t.Context(), incrementalConfig(server.URL, "a"), canonicalSnapshot{}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Quarantine) != 1 {
+		t.Fatalf("quarantine=%#v", next.Quarantine)
+	}
+	entry := next.Quarantine[0]
+	if entry.ReasonClass != "http" || entry.HTTPStatus != http.StatusBadGateway || entry.Title != "Movie One" || len(entry.Categories) != 1 || entry.LastFailure == nil || entry.LastFailure.IsZero() {
+		t.Fatalf("classified entry=%#v", entry)
+	}
+	timeout := newQuarantineEntry("movie", "m", "Movie", nil, "metadata request failed", context.DeadlineExceeded, quarantineEntry{})
+	canceled := newQuarantineEntry("movie", "m", "Movie", nil, "metadata request failed", context.Canceled, quarantineEntry{})
+	decode := newQuarantineEntry("movie", "m", "Movie", nil, "metadata request failed", &xtream.APIError{Kind: "decode"}, quarantineEntry{})
+	normalization := newQuarantineEntry("movie", "m", "Movie", nil, "title is empty", errCatalogNormalization, quarantineEntry{})
+	if timeout.ReasonClass != "timeout" || canceled.ReasonClass != "canceled" || decode.ReasonClass != "decode" || normalization.ReasonClass != "normalization" || quarantineRetryable(normalization) {
+		t.Fatalf("timeout/cancel/decode/normalization=%#v/%#v/%#v/%#v", timeout, canceled, decode, normalization)
+	}
+}
+
+func TestFailedChangedItemEnrichmentPreservesLiveCatalogRecord(t *testing.T) {
+	provider := newIncrementalProvider()
+	server := httptest.NewServer(http.HandlerFunc(provider.handler))
+	defer server.Close()
+	runtime := &catalogRuntime{}
+	config := incrementalConfig(server.URL, "a")
+	previous, _, _, err := runtime.fetchCatalog(t.Context(), config, canonicalSnapshot{}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	provider.movieRevision["m1"] = "changed"
+	provider.failMovies["m1"] = true
+	next, _, _, err := runtime.fetchCatalog(t.Context(), config, previous, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(next.Movies) != 1 || next.Movies[0].SourceID != "m1" || len(next.Quarantine) != 1 {
+		t.Fatalf("failed item removed live content: movies=%#v quarantine=%#v", next.Movies, next.Quarantine)
 	}
 }
 

@@ -94,9 +94,18 @@ type canonicalShow struct {
 }
 
 type quarantineEntry struct {
-	Kind     string `json:"kind"`
-	SourceID string `json:"source_id,omitempty"`
-	Reason   string `json:"reason"`
+	Kind            string               `json:"kind"`
+	SourceID        string               `json:"source_id,omitempty"`
+	ParentSourceID  string               `json:"parent_source_id,omitempty"`
+	Title           string               `json:"title,omitempty"`
+	Categories      []canonical.Category `json:"categories,omitempty"`
+	Reason          string               `json:"reason"`
+	ReasonClass     string               `json:"reason_class,omitempty"`
+	HTTPStatus      int                  `json:"http_status,omitempty"`
+	TransportClass  string               `json:"transport_error_class,omitempty"`
+	LastFailure     *time.Time           `json:"last_failure_at,omitempty"`
+	RetryCount      int                  `json:"retry_count,omitempty"`
+	LastRetryResult string               `json:"last_retry_result,omitempty"`
 }
 
 type canonicalSnapshot struct {
@@ -132,6 +141,7 @@ type catalogRuntime struct {
 
 type catalogRefreshMetrics struct {
 	Mode                  string `json:"mode,omitempty"`
+	EffectiveConcurrency  int    `json:"effective_concurrency,omitempty"`
 	MovieCandidates       int    `json:"movie_candidates"`
 	ShowCandidates        int    `json:"show_candidates"`
 	ReusedUnchanged       int    `json:"reused_unchanged"`
@@ -216,15 +226,30 @@ func (c *catalogRuntime) refreshLoop() {
 }
 
 func (c *catalogRuntime) triggerRefresh(reason string) bool {
-	return c.triggerCatalogBuild(reason, false)
+	return c.triggerCatalogBuild(reason, false, 0)
 }
 
 func (c *catalogRuntime) triggerRebuild(reason string) bool {
-	return c.triggerCatalogBuild(reason, true)
+	return c.triggerCatalogBuild(reason, true, 0)
 }
 
-func (c *catalogRuntime) triggerCatalogBuild(reason string, fullRebuild bool) bool {
+func (c *catalogRuntime) triggerRefreshWithConcurrency(reason string, concurrency int) bool {
+	return c.triggerCatalogBuild(reason, false, concurrency)
+}
+
+func (c *catalogRuntime) triggerRebuildWithConcurrency(reason string, concurrency int) bool {
+	return c.triggerCatalogBuild(reason, true, concurrency)
+}
+
+func (c *catalogRuntime) triggerCatalogBuild(reason string, fullRebuild bool, concurrency int) bool {
+	config := c.config.snapshot()
+	if concurrency == 0 {
+		concurrency = config.Catalog.RefreshConcurrency
+	}
 	_, mode := catalogBuildMode(c.snapshotCopy(), fullRebuild)
+	if !fullRebuild && reason == "manual" && hasCategoryExpansion(c.snapshotCopy(), config.Libraries) {
+		mode = "bootstrap"
+	}
 	c.refreshMu.Lock()
 	if c.refreshing {
 		c.refreshMu.Unlock()
@@ -235,22 +260,24 @@ func (c *catalogRuntime) triggerCatalogBuild(reason string, fullRebuild bool) bo
 	c.status.LastRefreshStarted = time.Now().UTC()
 	c.status.LastRefreshResult = "running"
 	c.status.LastRefreshError = ""
-	c.status.Metrics = catalogRefreshMetrics{Mode: mode}
+	c.status.Metrics = catalogRefreshMetrics{Mode: mode, EffectiveConcurrency: concurrency}
 	c.refreshMu.Unlock()
 	log.Printf("real catalog refresh started reason=%q mode=%q process_age_ms=%d", reason, mode, time.Since(c.startedAt).Milliseconds())
-	go c.runRefresh(reason, fullRebuild)
+	go c.runRefresh(reason, fullRebuild, mode, concurrency)
 	return true
 }
 
-func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool) {
+func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool, mode string, concurrency int) {
 	started := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), catalogRefreshTimeout)
 	config := c.config.snapshot()
+	config.Catalog.RefreshConcurrency = concurrency
 	fetcher := c.fetcher
 	var metrics catalogRefreshMetrics
 	previous := c.snapshotCopy()
-	effectiveFull, mode := catalogBuildMode(previous, fullRebuild)
+	effectiveFull, _ := catalogBuildMode(previous, fullRebuild)
 	metrics.Mode = mode
+	metrics.EffectiveConcurrency = concurrency
 	var next canonicalSnapshot
 	var client *xtream.Client
 	var err error
@@ -310,6 +337,27 @@ func catalogBuildMode(previous canonicalSnapshot, explicitFull bool) (bool, stri
 		return true, "bootstrap"
 	}
 	return false, "incremental"
+}
+
+func hasCategoryExpansion(previous canonicalSnapshot, libraries librariesConfig) bool {
+	movies, shows := map[string]bool{}, map[string]bool{}
+	for _, category := range snapshotMovieCategories(previous) {
+		movies[category.ID] = true
+	}
+	for _, category := range snapshotTVCategories(previous) {
+		shows[category.ID] = true
+	}
+	for _, id := range libraries.MovieCategoryIDs {
+		if !movies[id] {
+			return true
+		}
+	}
+	for _, id := range libraries.TVCategoryIDs {
+		if !shows[id] {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *catalogRuntime) updateRefreshMetrics(metrics catalogRefreshMetrics) {
@@ -432,7 +480,7 @@ func (c *catalogRuntime) fetchCatalog(ctx context.Context, config appConfig, pre
 }
 
 func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appConfig, previous canonicalSnapshot, fullRebuild bool, mode string) (canonicalSnapshot, *xtream.Client, catalogRefreshMetrics, error) {
-	metrics := catalogRefreshMetrics{Mode: mode}
+	metrics := catalogRefreshMetrics{Mode: mode, EffectiveConcurrency: config.Catalog.RefreshConcurrency}
 	client, err := c.clientForConfig(config)
 	if err != nil {
 		return canonicalSnapshot{}, nil, metrics, err
@@ -527,18 +575,22 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	for _, show := range previous.Shows {
 		previousShows[show.SourceID] = show
 	}
-	quarantinedMovies := make(map[string]bool)
-	quarantinedShows := make(map[string]bool)
+	quarantinedMovies := make(map[string]quarantineEntry)
+	quarantinedShows := make(map[string]quarantineEntry)
 	for _, item := range previous.Quarantine {
 		switch item.Kind {
 		case "movie":
-			quarantinedMovies[item.SourceID] = true
+			quarantinedMovies[item.SourceID] = item
 		case "show":
-			quarantinedShows[item.SourceID] = true
+			quarantinedShows[item.SourceID] = item
 		case "episode":
+			if item.ParentSourceID != "" {
+				quarantinedShows[item.ParentSourceID] = item
+				continue
+			}
 			for _, show := range previous.Shows {
 				if showContainsEpisode(show, item.SourceID) {
-					quarantinedShows[show.SourceID] = true
+					quarantinedShows[show.SourceID] = item
 				}
 			}
 		}
@@ -555,23 +607,31 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	}
 
 	type movieWork struct {
-		item  categorizedMovie
-		retry bool
+		item     categorizedMovie
+		retry    bool
+		previous quarantineEntry
+		fallback *canonicalMovie
 	}
 	var movieWorkItems []movieWork
 	for _, job := range movieItems {
 		fingerprint := movieListFingerprint(job.item)
 		old, exists := previousMovies[job.item.ID]
-		retry := quarantinedMovies[job.item.ID]
+		var fallback *canonicalMovie
+		if exists {
+			preserved := old
+			preserved.Category, preserved.Categories = job.category, job.categories
+			fallback = &preserved
+		}
+		previousQuarantine, retry := quarantinedMovies[job.item.ID]
 		switch {
 		case retry:
 			metrics.QuarantineRetries++
-			movieWorkItems = append(movieWorkItems, movieWork{item: job, retry: true})
+			movieWorkItems = append(movieWorkItems, movieWork{item: job, retry: true, previous: previousQuarantine, fallback: fallback})
 		case !exists:
 			metrics.New++
-			movieWorkItems = append(movieWorkItems, movieWork{item: job})
+			movieWorkItems = append(movieWorkItems, movieWork{item: job, fallback: fallback})
 		case fullRebuild:
-			movieWorkItems = append(movieWorkItems, movieWork{item: job})
+			movieWorkItems = append(movieWorkItems, movieWork{item: job, fallback: fallback})
 		case movieListingMatches(old, job.item, fingerprint):
 			old.Category = job.category
 			old.Categories = job.categories
@@ -586,15 +646,16 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 			result.Movies = append(result.Movies, old)
 		default:
 			metrics.Changed++
-			movieWorkItems = append(movieWorkItems, movieWork{item: job})
+			movieWorkItems = append(movieWorkItems, movieWork{item: job, fallback: fallback})
 		}
 	}
 	metrics.DetailRequests += len(movieWorkItems)
 	c.updateRefreshMetrics(metrics)
 	type movieResult struct {
-		movie canonicalMovie
-		q     *quarantineEntry
-		retry bool
+		movie    canonicalMovie
+		q        *quarantineEntry
+		retry    bool
+		fallback *canonicalMovie
 	}
 	movieJobs := make(chan movieWork)
 	movieResults := make(chan movieResult)
@@ -612,13 +673,15 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 				job, item := work.item, work.item.item
 				details, detailErr := client.MovieDetails(ctx, item.ID)
 				if detailErr != nil {
-					movieResults <- movieResult{q: &quarantineEntry{Kind: "movie", SourceID: item.ID, Reason: "metadata request failed"}, retry: work.retry}
+					entry := newQuarantineEntry("movie", item.ID, item.Name, job.categories, "metadata request failed", detailErr, work.previous)
+					movieResults <- movieResult{q: &entry, retry: work.retry, fallback: work.fallback}
 					continue
 				}
 				extension := firstNonEmptyString(details.Extension, item.Extension, "mkv")
 				title := firstNonEmptyString(details.Title, item.Name)
 				if title == "" {
-					movieResults <- movieResult{q: &quarantineEntry{Kind: "movie", SourceID: item.ID, Reason: "title is empty"}, retry: work.retry}
+					entry := newQuarantineEntry("movie", item.ID, item.Name, job.categories, "title is empty", errCatalogNormalization, work.previous)
+					movieResults <- movieResult{q: &entry, retry: work.retry, fallback: work.fallback}
 					continue
 				}
 				movieResults <- movieResult{movie: canonicalMovie{
@@ -640,6 +703,9 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 		if item.q != nil {
 			movieFailures++
 			result.Quarantine = append(result.Quarantine, *item.q)
+			if item.fallback != nil {
+				result.Movies = append(result.Movies, *item.fallback)
+			}
 		} else {
 			result.Movies = append(result.Movies, item.movie)
 			if item.retry {
@@ -658,23 +724,31 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 
 	tvDetailsStarted := time.Now()
 	type showWork struct {
-		item  categorizedSeries
-		retry bool
+		item     categorizedSeries
+		retry    bool
+		previous quarantineEntry
+		fallback *canonicalShow
 	}
 	var showWorkItems []showWork
 	for _, job := range showItems {
 		fingerprint := seriesListFingerprint(job.item)
 		old, exists := previousShows[job.item.ID]
-		retry := quarantinedShows[job.item.ID]
+		var fallback *canonicalShow
+		if exists {
+			preserved := old
+			preserved.Category, preserved.Categories = job.category, job.categories
+			fallback = &preserved
+		}
+		previousQuarantine, retry := quarantinedShows[job.item.ID]
 		switch {
 		case retry:
 			metrics.QuarantineRetries++
-			showWorkItems = append(showWorkItems, showWork{item: job, retry: true})
+			showWorkItems = append(showWorkItems, showWork{item: job, retry: true, previous: previousQuarantine, fallback: fallback})
 		case !exists:
 			metrics.New++
-			showWorkItems = append(showWorkItems, showWork{item: job})
+			showWorkItems = append(showWorkItems, showWork{item: job, fallback: fallback})
 		case fullRebuild:
-			showWorkItems = append(showWorkItems, showWork{item: job})
+			showWorkItems = append(showWorkItems, showWork{item: job, fallback: fallback})
 		case seriesListingMatches(old, job.item, fingerprint):
 			old.Category = job.category
 			old.Categories = job.categories
@@ -689,7 +763,7 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 			result.Shows = append(result.Shows, old)
 		default:
 			metrics.Changed++
-			showWorkItems = append(showWorkItems, showWork{item: job})
+			showWorkItems = append(showWorkItems, showWork{item: job, fallback: fallback})
 		}
 	}
 	metrics.DetailRequests += len(showWorkItems)
@@ -699,6 +773,7 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 		q          *quarantineEntry
 		quarantine []quarantineEntry
 		retry      bool
+		fallback   *canonicalShow
 	}
 	showJobs := make(chan showWork)
 	showResults := make(chan showResult)
@@ -716,7 +791,8 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 				job, item := work.item, work.item.item
 				details, detailErr := client.SeriesDetails(ctx, item.ID)
 				if detailErr != nil {
-					showResults <- showResult{q: &quarantineEntry{Kind: "show", SourceID: item.ID, Reason: "series traversal failed"}, retry: work.retry}
+					entry := newQuarantineEntry("show", item.ID, item.Name, job.categories, "series traversal failed", detailErr, work.previous)
+					showResults <- showResult{q: &entry, retry: work.retry, fallback: work.fallback}
 					continue
 				}
 				show := canonicalShow{
@@ -732,7 +808,9 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 				bySeason := make(map[int][]canonicalEpisode)
 				for _, episode := range details.Episodes {
 					if episode.ID == "" || episode.Season <= 0 || episode.Number <= 0 {
-						episodeQuarantine = append(episodeQuarantine, quarantineEntry{Kind: "episode", SourceID: episode.ID, Reason: "invalid season or episode identity"})
+						entry := newQuarantineEntry("episode", episode.ID, episode.Title, job.categories, "invalid season or episode identity", errCatalogNormalization, quarantineEntry{})
+						entry.ParentSourceID = item.ID
+						episodeQuarantine = append(episodeQuarantine, entry)
 						continue
 					}
 					extension := firstNonEmptyString(episode.Extension, "mkv")
@@ -744,7 +822,8 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 				}
 				sort.Slice(show.Seasons, func(i, j int) bool { return show.Seasons[i].Number < show.Seasons[j].Number })
 				if show.Title == "" || len(show.Seasons) == 0 {
-					showResults <- showResult{q: &quarantineEntry{Kind: "show", SourceID: item.ID, Reason: "series has no usable episodes"}, retry: work.retry}
+					entry := newQuarantineEntry("show", item.ID, item.Name, job.categories, "series has no usable episodes", errCatalogNormalization, work.previous)
+					showResults <- showResult{q: &entry, retry: work.retry, fallback: work.fallback}
 					continue
 				}
 				showResults <- showResult{show: show, quarantine: episodeQuarantine, retry: work.retry}
@@ -762,6 +841,9 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 		if item.q != nil {
 			showFailures++
 			result.Quarantine = append(result.Quarantine, *item.q)
+			if item.fallback != nil {
+				result.Shows = append(result.Shows, *item.fallback)
+			}
 		} else {
 			result.Shows = append(result.Shows, item.show)
 			result.Quarantine = append(result.Quarantine, item.quarantine...)
@@ -882,6 +964,29 @@ func appendUniqueCategory(categories []canonical.Category, category canonical.Ca
 		}
 	}
 	return append(categories, category)
+}
+
+var errCatalogNormalization = errors.New("catalog normalization failed")
+
+func newQuarantineEntry(kind, sourceID, title string, categories []canonical.Category, reason string, failure error, previous quarantineEntry) quarantineEntry {
+	class, status := xtream.ErrorDetails(failure)
+	if errors.Is(failure, errCatalogNormalization) {
+		class = "normalization"
+	}
+	failureTime := time.Now().UTC()
+	entry := quarantineEntry{
+		Kind: kind, SourceID: sourceID, Title: strings.TrimSpace(title),
+		Categories: append([]canonical.Category(nil), categories...), Reason: reason,
+		ReasonClass: class, HTTPStatus: status, LastFailure: &failureTime,
+	}
+	if class == "transport" || class == "timeout" || class == "canceled" {
+		entry.TransportClass = class
+	}
+	if previous.SourceID != "" || previous.Reason != "" {
+		entry.RetryCount = previous.RetryCount + 1
+		entry.LastRetryResult = "failed"
+	}
+	return entry
 }
 
 func excessiveDetailFailures(failures, total int) bool {

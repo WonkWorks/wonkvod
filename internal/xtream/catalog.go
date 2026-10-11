@@ -32,6 +32,52 @@ type Client struct {
 	seriesLRU   *list.List
 }
 
+// APIError is a sanitized provider failure. It intentionally retains no URL,
+// credentials, response body, or request headers, so callers may safely persist
+// its classification in catalog diagnostics.
+type APIError struct {
+	Kind       string
+	HTTPStatus int
+	Cause      error
+}
+
+func (e *APIError) Error() string {
+	switch {
+	case e.HTTPStatus != 0:
+		return fmt.Sprintf("xtream: API returned HTTP %d", e.HTTPStatus)
+	case e.Kind == "decode":
+		return "xtream: decode API response"
+	case e.Kind == "timeout":
+		return "xtream: API request timed out"
+	case e.Kind == "canceled":
+		return "xtream: API request canceled"
+	default:
+		return "xtream: API request failed"
+	}
+}
+
+func (e *APIError) Unwrap() error { return e.Cause }
+
+// ErrorDetails exposes only the safe classification needed by quarantine
+// diagnostics.
+func ErrorDetails(err error) (kind string, status int) {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Kind, apiErr.HTTPStatus
+	}
+	var unsupported interface{ CatalogItemUnsupported() bool }
+	if errors.As(err, &unsupported) && unsupported.CatalogItemUnsupported() {
+		return "normalization", 0
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout", 0
+	}
+	if errors.Is(err, context.Canceled) {
+		return "canceled", 0
+	}
+	return "unknown", 0
+}
+
 type seriesCacheEntry struct {
 	id       string
 	episodes []Episode
@@ -332,15 +378,21 @@ func (c *Client) getURL(ctx context.Context, targetURL string, target any) error
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return errors.New("xtream: API request failed")
+		kind := "transport"
+		if errors.Is(err, context.DeadlineExceeded) {
+			kind = "timeout"
+		} else if errors.Is(err, context.Canceled) {
+			kind = "canceled"
+		}
+		return &APIError{Kind: kind, Cause: err}
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("xtream: API returned HTTP %d", resp.StatusCode)
+		return &APIError{Kind: "http", HTTPStatus: resp.StatusCode}
 	}
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, maxAPIResponse))
 	if err := decoder.Decode(target); err != nil {
-		return fmt.Errorf("xtream: decode API response: %w", err)
+		return &APIError{Kind: "decode", Cause: err}
 	}
 	return nil
 }
