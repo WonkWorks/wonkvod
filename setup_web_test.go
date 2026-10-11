@@ -110,6 +110,7 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		`wonkvod-theme`, `<option value="system">System</option>`, `<option value="light">Light</option>`, `<option value="dark">Dark</option>`,
 		`wonkvodlogo_`, `wonkvodlogo_light.png`, `Connection failed.`, `Provider settings saved.`, `Settings saved.`,
 		`Catalog refresh concurrency`, `Lower values are friendlier to providers.`, `This does not control simultaneous video playback.`,
+		`Full Rebuild`, `Normal Refresh checks additions, removals, changes, and quarantined items`, `/api/catalog/rebuild`,
 		`The claimed Plex identity and secure endpoint are ready.`, `Destructive setup actions are intentionally unavailable.`,
 	} {
 		if !strings.Contains(body, required) {
@@ -120,6 +121,44 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("setup UI retains raw/legacy surface %q", forbidden)
 		}
+	}
+}
+
+func TestCatalogRebuildEndpointIsExplicit(t *testing.T) {
+	handler, runtime := setupFixture(t)
+	block := make(chan struct{})
+	runtime.fetcher = func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error) {
+		<-block
+		return runtime.snapshotCopy(), nil, nil
+	}
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/rebuild", nil))
+	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"mode":"full_rebuild"`) {
+		t.Fatalf("rebuild status=%d body=%s", response.Code, response.Body.String())
+	}
+	if got := runtime.catalogStatus().Metrics.Mode; got != "full_rebuild" {
+		t.Fatalf("rebuild mode=%q", got)
+	}
+	close(block)
+}
+
+func TestScheduledAndStartupRefreshUseIncrementalMode(t *testing.T) {
+	for _, reason := range []string{"scheduled", "startup"} {
+		t.Run(reason, func(t *testing.T) {
+			_, runtime := setupFixture(t)
+			block := make(chan struct{})
+			runtime.fetcher = func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error) {
+				<-block
+				return runtime.snapshotCopy(), nil, nil
+			}
+			if !runtime.triggerRefresh(reason) {
+				t.Fatal("refresh was rejected")
+			}
+			if got := runtime.catalogStatus().Metrics.Mode; got != "incremental" {
+				t.Fatalf("mode=%q", got)
+			}
+			close(block)
+		})
 	}
 }
 

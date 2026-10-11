@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,20 +43,22 @@ type Category struct {
 }
 
 type Movie struct {
-	ID         string
-	Name       string
-	Year       string
-	CategoryID string
-	Extension  string
-	Revision   string
+	ID          string
+	Name        string
+	Year        string
+	CategoryID  string
+	Extension   string
+	Revision    string
+	Fingerprint string
 }
 
 type Series struct {
-	ID         string
-	Name       string
-	Year       string
-	CategoryID string
-	Revision   string
+	ID          string
+	Name        string
+	Year        string
+	CategoryID  string
+	Revision    string
+	Fingerprint string
 }
 
 type Episode struct {
@@ -116,7 +119,7 @@ func (c *Client) Movies(ctx context.Context, categoryID string) ([]Movie, error)
 		if revision == "" {
 			revision = item.Added.String()
 		}
-		movies = append(movies, Movie{ID: item.StreamID.String(), Name: item.Name, Year: item.Year.String(), CategoryID: categoryID, Extension: ext, Revision: revision})
+		movies = append(movies, Movie{ID: item.StreamID.String(), Name: item.Name, Year: item.Year.String(), CategoryID: categoryID, Extension: ext, Revision: revision, Fingerprint: movieJSONFingerprint(item, ext, revision)})
 	}
 	return movies, nil
 }
@@ -134,7 +137,7 @@ func (c *Client) Series(ctx context.Context, categoryID string) ([]Series, error
 		if (item.CategoryID.String() != "" && item.CategoryID.String() != categoryID) || item.SeriesID.String() == "" || strings.TrimSpace(item.Name) == "" {
 			continue
 		}
-		series = append(series, Series{ID: item.SeriesID.String(), Name: item.Name, Year: item.Year.String(), CategoryID: categoryID, Revision: item.LastModified.String()})
+		series = append(series, Series{ID: item.SeriesID.String(), Name: item.Name, Year: item.Year.String(), CategoryID: categoryID, Revision: item.LastModified.String(), Fingerprint: seriesJSONFingerprint(item)})
 	}
 	return series, nil
 }
@@ -381,14 +384,52 @@ type movieJSON struct {
 	Extension    string         `json:"container_extension"`
 	Added        flexibleString `json:"added"`
 	LastModified flexibleString `json:"last_modified"`
+	StreamIcon   string         `json:"stream_icon"`
+	Rating       flexibleString `json:"rating"`
+	ReleaseDate  string         `json:"release_date"`
+	Plot         string         `json:"plot"`
+	Genre        string         `json:"genre"`
+	Director     string         `json:"director"`
+	Cast         string         `json:"cast"`
+	Trailer      string         `json:"youtube_trailer"`
 }
 
 type seriesJSON struct {
-	SeriesID     flexibleString `json:"series_id"`
-	Name         string         `json:"name"`
-	Year         flexibleString `json:"year"`
-	CategoryID   flexibleString `json:"category_id"`
-	LastModified flexibleString `json:"last_modified"`
+	SeriesID       flexibleString `json:"series_id"`
+	Name           string         `json:"name"`
+	Year           flexibleString `json:"year"`
+	CategoryID     flexibleString `json:"category_id"`
+	LastModified   flexibleString `json:"last_modified"`
+	Cover          string         `json:"cover"`
+	Rating         flexibleString `json:"rating"`
+	ReleaseDate    string         `json:"release_date"`
+	ReleaseDateAlt string         `json:"releaseDate"`
+	Plot           string         `json:"plot"`
+	Genre          string         `json:"genre"`
+	Director       string         `json:"director"`
+	Cast           string         `json:"cast"`
+	Trailer        string         `json:"youtube_trailer"`
+	EpisodeRunTime flexibleString `json:"episode_run_time"`
+	BackdropPath   []string       `json:"backdrop_path"`
+}
+
+func movieJSONFingerprint(item movieJSON, extension, revision string) string {
+	return fingerprintFields("movie", item.StreamID.String(), item.Name, item.Year.String(), extension, revision, item.StreamIcon, item.Rating.String(), item.ReleaseDate, item.Plot, item.Genre, item.Director, item.Cast, item.Trailer)
+}
+
+func seriesJSONFingerprint(item seriesJSON) string {
+	fields := []string{"show", item.SeriesID.String(), item.Name, item.Year.String(), item.LastModified.String(), item.Cover, item.Rating.String(), item.ReleaseDate, item.ReleaseDateAlt, item.Plot, item.Genre, item.Director, item.Cast, item.Trailer, item.EpisodeRunTime.String()}
+	fields = append(fields, item.BackdropPath...)
+	return fingerprintFields(fields...)
+}
+
+func fingerprintFields(fields ...string) string {
+	hash := sha256.New()
+	for _, field := range fields {
+		_, _ = hash.Write([]byte(strings.TrimSpace(field)))
+		_, _ = hash.Write([]byte{0})
+	}
+	return fmt.Sprintf("sha256:%x", hash.Sum(nil))
 }
 
 type mediaInfoJSON struct {

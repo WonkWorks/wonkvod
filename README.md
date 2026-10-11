@@ -150,7 +150,18 @@ and must remain on a trusted LAN.
 ## Catalog lifecycle
 
 - The last good `catalog.json` snapshot loads immediately at startup.
-- Refresh runs in the background while the current catalog remains available.
+- Normal **Refresh Now**, startup refresh, and the six-hour schedule are
+  incremental. They fetch selected category lists, reuse unchanged canonical
+  records, detect additions/removals/list-level changes, update membership-only
+  changes without detail calls, and retry items in quarantine.
+- Cold bootstrap with no usable snapshot necessarily fetches details for the
+  complete selected catalog.
+- **Full Rebuild** is an explicit, confirmed maintenance action that re-fetches
+  details for every selected item. It is never selected automatically merely
+  because the service restarted.
+- Refresh and rebuild run in the background while the current catalog remains
+  available. The configured concurrency applies to required detail calls in
+  either mode.
 - A completed catalog is saved and promoted atomically.
 - Cancellation, systemic provider failure, or persistence failure leaves the
   current snapshot active.
@@ -161,15 +172,21 @@ and must remain on a trusted LAN.
   category filter; stable Plex IDs remain based on source identity.
 - Isolated items whose metadata cannot be normalized are quarantined rather
   than blocking an otherwise healthy refresh. The Overview status reports the
-  quarantine count.
+  quarantine count; normal refresh retries listed items in quarantine.
 - MediaFacts are inspected lazily when an item needs them and are merged into
   later catalog snapshots by stable source identity. Refresh does not probe the
   entire media catalog.
 - Metadata and artwork are projected from the provider. Availability can vary
   by provider item.
 
-Large catalogs can take hours at conservative concurrency without interrupting
-browsing or playback from the last good snapshot.
+Movie list provenance uses the provider's stable identity, name/year,
+container, `added` value, and list presentation fields. TV uses equivalent list
+presentation fields plus `last_modified`, which is the provider's inexpensive
+signal for episode-tree changes. These signals make steady-state refresh cheap,
+but they remain provider assertions rather than an independent content audit.
+Use the explicit Full Rebuild operation for occasional deep revalidation when
+provider behavior or metadata freshness is in doubt; WonkVOD does not schedule
+an expensive periodic rebuild implicitly.
 
 ## Ports and paths
 
