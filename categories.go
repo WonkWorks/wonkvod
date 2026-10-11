@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	canonical "wonkvod/internal/catalog"
 )
 
 type genreFacet struct {
@@ -110,6 +112,9 @@ func movieGenreFacets(items []canonicalMovie) []genreFacet {
 	values := make(map[string]genreFacet)
 	for _, item := range items {
 		art := "/library/metadata/" + movieObjectID(item) + "/art/1"
+		for _, category := range itemCategories(item.Category, item.Categories) {
+			addGenreFacet(values, category.Name, art)
+		}
 		for _, genre := range item.Details.Genres {
 			addGenreFacet(values, genre, art)
 		}
@@ -121,28 +126,14 @@ func showGenreFacets(items []canonicalShow) []genreFacet {
 	values := make(map[string]genreFacet)
 	for _, item := range items {
 		art := "/library/metadata/" + showObjectID(item) + "/art/1"
+		for _, category := range itemCategories(item.Category, item.Categories) {
+			addGenreFacet(values, category.Name, art)
+		}
 		for _, genre := range item.Details.Genres {
 			addGenreFacet(values, genre, art)
 		}
 	}
-	if len(values) == 0 {
-		for _, item := range items {
-			art := "/library/metadata/" + showObjectID(item) + "/art/1"
-			addGenreFacet(values, item.Category.Name, art)
-		}
-	}
 	return orderedGenreFacets(values)
-}
-
-func showsHaveGenres(items []canonicalShow) bool {
-	for _, item := range items {
-		for _, genre := range item.Details.Genres {
-			if normalizeGenre(genre) != "" {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 func selectedGenre(facets []genreFacet, id string) (string, bool) {
@@ -163,6 +154,18 @@ func hasGenre(values []string, normalized string) bool {
 	return false
 }
 
+func hasSourceCategory(primary catalogCategory, categories []canonical.Category, id, normalizedName string) bool {
+	for _, category := range itemCategories(primary, categories) {
+		if id != "" && category.ID == id {
+			return true
+		}
+		if normalizedName != "" && normalizeGenre(category.Name) == normalizedName {
+			return true
+		}
+	}
+	return false
+}
+
 func filterMoviesByGenre(items []canonicalMovie, id string) []canonicalMovie {
 	if id == "" {
 		return items
@@ -173,7 +176,7 @@ func filterMoviesByGenre(items []canonicalMovie, id string) []canonicalMovie {
 	}
 	result := make([]canonicalMovie, 0)
 	for _, item := range items {
-		if hasGenre(item.Details.Genres, normalized) {
+		if hasGenre(item.Details.Genres, normalized) || hasSourceCategory(item.Category, item.Categories, "", normalized) {
 			result = append(result, item)
 		}
 	}
@@ -189,9 +192,8 @@ func filterShowsByGenre(items []canonicalShow, id string) []canonicalShow {
 		return []canonicalShow{}
 	}
 	result := make([]canonicalShow, 0)
-	useCategoryMembership := !showsHaveGenres(items)
 	for _, item := range items {
-		if hasGenre(item.Details.Genres, normalized) || (useCategoryMembership && normalizeGenre(item.Category.Name) == normalized) {
+		if hasGenre(item.Details.Genres, normalized) || hasSourceCategory(item.Category, item.Categories, "", normalized) {
 			result = append(result, item)
 		}
 	}

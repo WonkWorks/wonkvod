@@ -66,21 +66,22 @@ func TestRealMovieCategoriesAndGenreFiltering(t *testing.T) {
 	states := []string{snapshot.Movies[0].MediaFacts.State, snapshot.Movies[1].MediaFacts.State}
 	container, directories := categoryDirectoriesFromResponse(t, handler, "/library/sections/1/categories")
 
-	if container["identifier"] != "com.plexapp.plugins.library" || container["content"] != "secondary" || container["title1"] != libraryName || container["title2"] != "" || container["viewGroup"] != "secondary" || container["size"] != float64(3) {
+	if container["identifier"] != "com.plexapp.plugins.library" || container["content"] != "secondary" || container["title1"] != libraryName || container["title2"] != "" || container["viewGroup"] != "secondary" || container["size"] != float64(4) {
 		t.Fatalf("movie category container=%#v", container)
 	}
 	meta := container["Meta"].(map[string]any)["Type"].([]any)[0].(map[string]any)
 	if meta["key"] != "/library/sections/1/categories" || meta["type"] != "directory" || meta["title"] != "Categories" || meta["active"] != true {
 		t.Fatalf("movie category Meta=%#v", meta)
 	}
-	if got, want := categoryTitles(directories), []string{"Action", "comedy", "Drama"}; !reflect.DeepEqual(got, want) {
+	if got, want := categoryTitles(directories), []string{"Action", "Black Cinema", "comedy", "Drama"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("movie category titles=%#v want=%#v", got, want)
 	}
 
 	wantTitles := map[string][]string{
-		"Action": {"Action Fixture"},
-		"comedy": {"Action Fixture", "Fixture Movie"},
-		"Drama":  {"Fixture Movie"},
+		"Action":       {"Action Fixture"},
+		"Black Cinema": {"Action Fixture", "Fixture Movie"},
+		"comedy":       {"Action Fixture", "Fixture Movie"},
+		"Drama":        {"Fixture Movie"},
 	}
 	for _, directory := range directories {
 		key := directory["key"].(string)
@@ -107,13 +108,15 @@ func TestRealTVCategoriesAndGenreFiltering(t *testing.T) {
 	handler, _ := categoryTestHandler(t)
 	container, directories := categoryDirectoriesFromResponse(t, handler, "/library/sections/2/categories")
 
-	if container["identifier"] != "com.plexapp.plugins.library" || container["content"] != "secondary" || container["title1"] != tvLibraryName || container["title2"] != "" || container["nocache"] != true || container["size"] != float64(3) {
+	if container["identifier"] != "com.plexapp.plugins.library" || container["content"] != "secondary" || container["title1"] != tvLibraryName || container["title2"] != "" || container["nocache"] != true || container["size"] != float64(5) {
 		t.Fatalf("TV category container=%#v", container)
 	}
-	if got, want := categoryTitles(directories), []string{"Comedy", "Drama", "reality"}; !reflect.DeepEqual(got, want) {
+	if got, want := categoryTitles(directories), []string{"A&E", "BET", "Comedy", "Drama", "reality"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("TV category titles=%#v want=%#v", got, want)
 	}
 	wantTitles := map[string][]string{
+		"A&E":     {"Comedy Fixture"},
+		"BET":     {"Fixture Show"},
 		"Comedy":  {"Comedy Fixture"},
 		"Drama":   {"Fixture Show"},
 		"reality": {"Comedy Fixture", "Fixture Show"},
@@ -146,7 +149,7 @@ func TestRealCategoryXMLLegacyGenreAndEmptyLibrary(t *testing.T) {
 	}
 
 	legacy, directories := categoryDirectoriesFromResponse(t, handler, "/library/sections/1/genre")
-	if legacy["title2"] != "By Genre" || legacy["Meta"] != nil || len(directories) != 3 {
+	if legacy["title2"] != "By Genre" || legacy["Meta"] != nil || len(directories) != 4 {
 		t.Fatalf("legacy genre container=%#v", legacy)
 	}
 	for _, directory := range directories {

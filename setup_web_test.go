@@ -36,7 +36,7 @@ func setupFixture(t *testing.T) (*realCatalogHandler, *catalogRuntime) {
 func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	handler, _ := setupFixture(t)
 	server := handler.SetupHandler()
-	for _, path := range []string{"/", "/plex", "/provider", "/libraries", "/settings", "/assets/branding/wonkvodlogo_dark.png"} {
+	for _, path := range []string{"/", "/plex", "/provider", "/categories", "/libraries", "/settings", "/assets/branding/wonkvodlogo_dark.png", "/assets/branding/wonkvodlogo_light.png"} {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
 		if response.Code != http.StatusOK {
@@ -58,6 +58,29 @@ func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	}
 	if !strings.Contains(plex.Body.String(), `"claimed":true`) {
 		t.Fatalf("Plex claimed status was not projected: %s", plex.Body.String())
+	}
+}
+
+func TestSetupUIHardeningContract(t *testing.T) {
+	handler, _ := setupFixture(t)
+	response := httptest.NewRecorder()
+	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/categories", nil))
+	body := response.Body.String()
+	for _, required := range []string{
+		`href="/categories">Categories`, `<h1>Categories</h1>`, `Movie Categories`, `TV Categories`,
+		`Categories saved.`, `A catalog refresh is required`, `Refresh Now`, `Saving…`,
+		`Refreshing catalog…`, `Your previous catalog is still active.`, `setTimeout(overview,3000)`,
+		`wonkvod-theme`, `<option value="system">System</option>`, `<option value="light">Light</option>`, `<option value="dark">Dark</option>`,
+		`wonkvodlogo_`, `wonkvodlogo_light.png`, `Connection failed.`, `Provider settings saved.`, `Settings saved.`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Fatalf("setup UI missing %q", required)
+		}
+	}
+	for _, forbidden := range []string{`href="/libraries">Libraries`, `<h1>Libraries</h1>`, `<pre id="result">`, `JSON.stringify(await api`} {
+		if strings.Contains(body, forbidden) {
+			t.Fatalf("setup UI retains raw/legacy surface %q", forbidden)
+		}
 	}
 }
 
