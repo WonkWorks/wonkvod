@@ -37,6 +37,11 @@ const (
 	numericNamespaceWidth = uint64(1_000_000_000_000_000)
 )
 
+var realTVCategoryTargets = []catalogCategory{
+	{ID: "887", Name: realTVCategoryName},
+	{ID: "926", Name: "A&E"},
+}
+
 type catalogCategory struct {
 	ID    string `json:"id"`
 	Name  string `json:"name"`
@@ -90,6 +95,7 @@ type canonicalSnapshot struct {
 	GeneratedAt   time.Time         `json:"generated_at"`
 	MovieCategory catalogCategory   `json:"movie_category"`
 	TVCategory    catalogCategory   `json:"tv_category"`
+	TVCategories  []catalogCategory `json:"tv_categories,omitempty"`
 	Movies        []canonicalMovie  `json:"movies"`
 	Shows         []canonicalShow   `json:"shows"`
 	Quarantine    []quarantineEntry `json:"quarantine,omitempty"`
@@ -197,23 +203,42 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 	if err != nil {
 		return canonicalSnapshot{}, err
 	}
-	tvCategory, err := selectCategory(tvCategories, realTVCategoryName)
-	if err != nil {
-		return canonicalSnapshot{}, err
-	}
 	movieItems, err := c.client.Movies(ctx, movieCategory.ID)
-	if err != nil {
-		return canonicalSnapshot{}, err
-	}
-	showItems, err := c.client.Series(ctx, tvCategory.ID)
 	if err != nil {
 		return canonicalSnapshot{}, err
 	}
 	result := canonicalSnapshot{
 		Version: realCatalogVersion, GeneratedAt: time.Now().UTC(),
 		MovieCategory: catalogCategory{ID: movieCategory.ID, Name: movieCategory.Name, Count: len(movieItems)},
-		TVCategory:    catalogCategory{ID: tvCategory.ID, Name: tvCategory.Name, Count: len(showItems)},
 	}
+	type categorizedSeries struct {
+		item     xtream.Series
+		category catalogCategory
+	}
+	var showItems []categorizedSeries
+	seenSeries := make(map[string]string)
+	for _, target := range realTVCategoryTargets {
+		category, categoryErr := selectCategoryByIDAndName(tvCategories, target.ID, target.Name)
+		if categoryErr != nil {
+			return canonicalSnapshot{}, categoryErr
+		}
+		items, seriesErr := c.client.Series(ctx, category.ID)
+		if seriesErr != nil {
+			return canonicalSnapshot{}, seriesErr
+		}
+		selected := catalogCategory{ID: category.ID, Name: category.Name, Count: len(items)}
+		result.TVCategories = append(result.TVCategories, selected)
+		for _, item := range items {
+			if previous, exists := seenSeries[item.ID]; exists {
+				return canonicalSnapshot{}, fmt.Errorf("real catalog: series %s appears in both TV categories %s and %s", item.ID, previous, selected.ID)
+			}
+			seenSeries[item.ID] = selected.ID
+			showItems = append(showItems, categorizedSeries{item: item, category: selected})
+		}
+	}
+	// Retain the original primary field so a newly written snapshot remains
+	// readable by the previous single-category binary during rollback.
+	result.TVCategory = result.TVCategories[0]
 
 	type movieResult struct {
 		movie canonicalMovie
@@ -270,7 +295,7 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 		q          *quarantineEntry
 		quarantine []quarantineEntry
 	}
-	showJobs := make(chan xtream.Series)
+	showJobs := make(chan categorizedSeries)
 	showResults := make(chan showResult)
 	workers = sync.WaitGroup{}
 	workerCount = providerDetailWorkers
@@ -281,14 +306,15 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for item := range showJobs {
+			for job := range showJobs {
+				item := job.item
 				details, detailErr := c.client.SeriesDetails(ctx, item.ID)
 				if detailErr != nil {
 					showResults <- showResult{q: &quarantineEntry{Kind: "show", SourceID: item.ID, Reason: "series traversal failed"}}
 					continue
 				}
 				show := canonicalShow{
-					SourceID: item.ID, Category: result.TVCategory,
+					SourceID: item.ID, Category: job.category,
 					Title: firstNonEmptyString(details.Title, item.Name), Year: firstNonEmptyString(details.Year, item.Year),
 					Revision: item.Revision, Details: details,
 				}
@@ -366,6 +392,29 @@ func selectCategory(categories []xtream.Category, name string) (xtream.Category,
 	return matches[0], nil
 }
 
+func selectCategoryByIDAndName(categories []xtream.Category, id, name string) (xtream.Category, error) {
+	var matches []xtream.Category
+	for _, category := range categories {
+		if category.ID == id && strings.EqualFold(strings.TrimSpace(category.Name), name) {
+			matches = append(matches, category)
+		}
+	}
+	if len(matches) != 1 {
+		return xtream.Category{}, fmt.Errorf("real catalog: category %s/%q matched %d provider categories", id, name, len(matches))
+	}
+	return matches[0], nil
+}
+
+func snapshotTVCategories(snapshot canonicalSnapshot) []catalogCategory {
+	if len(snapshot.TVCategories) > 0 {
+		return snapshot.TVCategories
+	}
+	if snapshot.TVCategory.ID != "" {
+		return []catalogCategory{snapshot.TVCategory}
+	}
+	return nil
+}
+
 func (c *catalogRuntime) logSummary(snapshot canonicalSnapshot) {
 	seasons, episodes := 0, 0
 	for _, show := range snapshot.Shows {
@@ -386,7 +435,21 @@ func (c *catalogRuntime) logSummary(snapshot canonicalSnapshot) {
 		}
 	}
 	log.Printf("real catalog selected category=%q provider_id=%s top_level=%d accepted=%d quarantined=%d", snapshot.MovieCategory.Name, snapshot.MovieCategory.ID, snapshot.MovieCategory.Count, len(snapshot.Movies), movieRejected)
-	log.Printf("real catalog selected category=%q provider_id=%s top_level=%d accepted=%d quarantined=%d seasons=%d episodes=%d malformed_episodes=%d", snapshot.TVCategory.Name, snapshot.TVCategory.ID, snapshot.TVCategory.Count, len(snapshot.Shows), showRejected, seasons, episodes, episodeRejected)
+	for _, category := range snapshotTVCategories(snapshot) {
+		accepted, categorySeasons, categoryEpisodes := 0, 0, 0
+		for _, show := range snapshot.Shows {
+			if show.Category.ID != category.ID {
+				continue
+			}
+			accepted++
+			categorySeasons += len(show.Seasons)
+			for _, season := range show.Seasons {
+				categoryEpisodes += len(season.Episodes)
+			}
+		}
+		log.Printf("real catalog selected category=%q provider_id=%s top_level=%d accepted=%d seasons=%d episodes=%d", category.Name, category.ID, category.Count, accepted, categorySeasons, categoryEpisodes)
+	}
+	log.Printf("real catalog TV totals accepted=%d quarantined=%d seasons=%d episodes=%d malformed_episodes=%d", len(snapshot.Shows), showRejected, seasons, episodes, episodeRejected)
 }
 
 func loadCanonicalSnapshot(path string) (canonicalSnapshot, error) {

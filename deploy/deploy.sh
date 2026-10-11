@@ -33,7 +33,9 @@ verify_image() {
 
 wait_for_backend() {
 	count=0
-	while [ "$count" -lt 30 ]; do
+	# Initial catalog traversal is intentionally completed before the HTTP
+	# listener starts. Allow three minutes for larger selected category sets.
+	while [ "$count" -lt 90 ]; do
 		state=$(docker inspect --format '{{.State.Status}}' wonkvod-backend 2>/dev/null || true)
 		health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' wonkvod-backend 2>/dev/null || true)
 		if [ "$state" = "running" ] && [ "$health" = "healthy" ]; then
