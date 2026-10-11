@@ -391,6 +391,130 @@ func TestRokuDecisionDoesNotClaimDirectPlayForMultichannelAAC(t *testing.T) {
 	}
 }
 
+func TestRokuDecisionEvaluatesSelectedAudioStream(t *testing.T) {
+	tests := []struct {
+		name             string
+		audio            []canonical.AudioStream
+		explicitAudio    int
+		wantStatus       int
+		wantSelectedPlex int
+	}{
+		{
+			name: "primary compatible secondary incompatible uses canonical first fallback",
+			audio: []canonical.AudioStream{
+				{Index: 1, Codec: "eac3", Channels: 8, ChannelLayout: "7.1"},
+				{Index: 2, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1"},
+			},
+			wantStatus:       http.StatusOK,
+			wantSelectedPlex: int(audioStreamObjectID("movie", "movie-1")),
+		},
+		{
+			name: "primary incompatible secondary compatible remains incompatible",
+			audio: []canonical.AudioStream{
+				{Index: 1, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1", Default: true},
+				{Index: 2, Codec: "eac3", Channels: 6, ChannelLayout: "5.1"},
+			},
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name: "explicit compatible alternate",
+			audio: []canonical.AudioStream{
+				{Index: 1, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1", Default: true},
+				{Index: 2, Codec: "eac3", Channels: 6, ChannelLayout: "5.1"},
+			},
+			explicitAudio:    int(stableNumericID('8', "xtream:movie:movie-1:audio:2")),
+			wantStatus:       http.StatusOK,
+			wantSelectedPlex: int(stableNumericID('8', "xtream:movie:movie-1:audio:2")),
+		},
+		{
+			name: "explicit incompatible alternate",
+			audio: []canonical.AudioStream{
+				{Index: 1, Codec: "eac3", Channels: 6, ChannelLayout: "5.1", Default: true},
+				{Index: 2, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1"},
+			},
+			explicitAudio: int(stableNumericID('8', "xtream:movie:movie-1:audio:2")),
+			wantStatus:    http.StatusUnprocessableEntity,
+		},
+		{
+			name: "single incompatible track preserves existing behavior",
+			audio: []canonical.AudioStream{
+				{Index: 1, Codec: "aac", Profile: "lc", Channels: 6, ChannelLayout: "5.1", Default: true},
+			},
+			wantStatus: http.StatusUnprocessableEntity,
+		},
+		{
+			name:       "no audio is deterministic",
+			audio:      nil,
+			wantStatus: http.StatusOK,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			handler, snapshot, _ := realCatalogTestHandler(t)
+			snapshot.Movies[0].MediaFacts.Audio = test.audio
+			handler.catalog.mu.Lock()
+			handler.catalog.snapshot = *snapshot
+			handler.catalog.mu.Unlock()
+
+			movieID := movieObjectID(snapshot.Movies[0])
+			target := "/video/:/transcode/universal/decision?path=" + url.QueryEscape("/library/metadata/"+movieID)
+			if test.explicitAudio != 0 {
+				target += "&audioStreamID=" + strconv.Itoa(test.explicitAudio)
+			}
+			request := httptest.NewRequest(http.MethodGet, target, nil)
+			request.Header.Set("Accept", "application/json")
+			request.Header.Set("X-Plex-Platform", "Roku")
+			response := httptest.NewRecorder()
+			handler.ServeHTTP(response, request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status=%d want=%d body=%q", response.Code, test.wantStatus, response.Body.String())
+			}
+			if response.Code != http.StatusOK || test.wantSelectedPlex == 0 {
+				return
+			}
+
+			container := decodeContainer(t, response)
+			metadata := container["Metadata"].([]any)[0].(map[string]any)
+			media := metadata["Media"].([]any)[0].(map[string]any)
+			part := media["Part"].([]any)[0].(map[string]any)
+			streams := part["Stream"].([]any)
+			selected := 0
+			for _, raw := range streams {
+				stream := raw.(map[string]any)
+				if stream["streamType"] == float64(2) && stream["selected"] == true {
+					selected = int(stream["id"].(float64))
+				}
+			}
+			if selected != test.wantSelectedPlex {
+				t.Fatalf("selected audio ID=%d want=%d", selected, test.wantSelectedPlex)
+			}
+		})
+	}
+}
+
+func TestRokuDecisionRejectsAmbiguousOrUnknownAudioSelection(t *testing.T) {
+	handler, snapshot, _ := realCatalogTestHandler(t)
+	snapshot.Movies[0].MediaFacts.Audio = []canonical.AudioStream{
+		{Index: 1, Codec: "eac3", Channels: 6, Default: true},
+		{Index: 2, Codec: "aac", Channels: 2, Default: true},
+	}
+	handler.catalog.mu.Lock()
+	handler.catalog.snapshot = *snapshot
+	handler.catalog.mu.Unlock()
+	movieID := movieObjectID(snapshot.Movies[0])
+	base := "/video/:/transcode/universal/decision?path=" + url.QueryEscape("/library/metadata/"+movieID)
+	for _, target := range []string{base, base + "&audioStreamID=123"} {
+		request := httptest.NewRequest(http.MethodGet, target, nil)
+		request.Header.Set("X-Plex-Platform", "Roku")
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("target=%q status=%d body=%q", target, response.Code, response.Body.String())
+		}
+	}
+}
+
 func strconvFormatInt(value int64) string {
 	return strings.TrimSpace(strconv.FormatInt(value, 10))
 }

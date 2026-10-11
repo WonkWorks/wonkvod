@@ -1094,7 +1094,13 @@ func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Reques
 	if item.Episode != nil {
 		item.Episode.MediaFacts = item.MediaFacts
 	}
-	if reason := unsupportedDirectPlayReason(r, item.MediaFacts); reason != "" {
+	audioSelection, selectionErr := decisionAudioStream(r, item)
+	if selectionErr != nil {
+		addCommonHeaders(w)
+		http.Error(w, selectionErr.Error(), http.StatusUnprocessableEntity)
+		return true
+	}
+	if reason := unsupportedDirectPlayReason(r, item.MediaFacts, audioSelection); reason != "" {
 		addCommonHeaders(w)
 		http.Error(w, reason, http.StatusUnprocessableEntity)
 		return true
@@ -1105,6 +1111,9 @@ func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Reques
 	projected.Media[0].Part[0].Selected = truePointer()
 	for index := range projected.Media[0].Part[0].Stream {
 		projected.Media[0].Part[0].Stream[index].Location = "direct"
+		if projected.Media[0].Part[0].Stream[index].StreamType == 2 && audioSelection.Found {
+			projected.Media[0].Part[0].Stream[index].Selected = plexBool(projected.Media[0].Part[0].Stream[index].ID == audioSelection.PlexID)
+		}
 	}
 	session := firstNonEmptyString(r.URL.Query().Get("X-Plex-Session-Identifier"), r.URL.Query().Get("session"))
 	container := mediaContainer{Size: 1, AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MDEDecisionCode: 1000, MDEDecisionText: "Direct play OK.", MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, ResourceSession: session, Metadata: []movie{projected}}
@@ -1117,15 +1126,65 @@ func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Reques
 	return true
 }
 
-func unsupportedDirectPlayReason(r *http.Request, facts canonical.MediaFacts) string {
+type selectedAudioStream struct {
+	Facts  canonical.AudioStream
+	PlexID int
+	Found  bool
+}
+
+func decisionAudioStream(r *http.Request, item catalogPlayable) (selectedAudioStream, error) {
+	audio := item.MediaFacts.Audio
+	if len(audio) == 0 {
+		return selectedAudioStream{}, nil
+	}
+	plexID := func(index int) int {
+		id := audioStreamObjectID(item.Kind, item.SourceID)
+		if index > 0 {
+			id = stableNumericID('8', "xtream:"+item.Kind+":"+item.SourceID+":audio:"+strconv.Itoa(audio[index].Index))
+		}
+		return int(id)
+	}
+
+	if value := strings.TrimSpace(r.URL.Query().Get("audioStreamID")); value != "" {
+		requested, err := strconv.Atoi(value)
+		if err != nil {
+			return selectedAudioStream{}, fmt.Errorf("invalid audioStreamID %q", value)
+		}
+		for index, stream := range audio {
+			if id := plexID(index); id == requested {
+				return selectedAudioStream{Facts: stream, PlexID: id, Found: true}, nil
+			}
+		}
+		return selectedAudioStream{}, fmt.Errorf("unknown audioStreamID %d", requested)
+	}
+
+	defaultIndex := -1
+	for index, stream := range audio {
+		if !stream.Default {
+			continue
+		}
+		if defaultIndex >= 0 {
+			return selectedAudioStream{}, errors.New("ambiguous audio selection: multiple default streams")
+		}
+		defaultIndex = index
+	}
+	if defaultIndex >= 0 {
+		return selectedAudioStream{Facts: audio[defaultIndex], PlexID: plexID(defaultIndex), Found: true}, nil
+	}
+
+	// Media.audioCodec/audioChannels are projected from the first canonical
+	// audio stream. Use that same stable fallback when ffprobe marks no stream
+	// as default, rather than allowing an alternate track to veto playback.
+	return selectedAudioStream{Facts: audio[0], PlexID: plexID(0), Found: true}, nil
+}
+
+func unsupportedDirectPlayReason(r *http.Request, facts canonical.MediaFacts, audio selectedAudioStream) string {
 	platform := firstNonEmptyString(r.Header.Get("X-Plex-Platform"), r.URL.Query().Get("X-Plex-Platform"))
 	if !strings.EqualFold(platform, "Roku") || facts.State != "inspected" {
 		return ""
 	}
-	for _, audio := range facts.Audio {
-		if audio.Codec == "aac" && audio.Channels > 2 {
-			return "media requires AAC multichannel audio transcoding, which WonkVOD does not provide"
-		}
+	if audio.Found && audio.Facts.Codec == "aac" && audio.Facts.Channels > 2 {
+		return "media requires AAC multichannel audio transcoding, which WonkVOD does not provide"
 	}
 	return ""
 }
