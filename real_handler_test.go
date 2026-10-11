@@ -101,6 +101,40 @@ func decodeContainer(t *testing.T, recorder *httptest.ResponseRecorder) map[stri
 	return container
 }
 
+func assertPlayQueueSelection(t *testing.T, queue map[string]any, wantRatingKey string) {
+	t.Helper()
+	metadata, ok := queue["Metadata"].([]any)
+	if !ok || len(metadata) != 1 {
+		t.Fatalf("queue Metadata=%#v, want one selected item", queue["Metadata"])
+	}
+	selected, ok := metadata[0].(map[string]any)
+	if !ok {
+		t.Fatalf("queue Metadata[0]=%#v, want object", metadata[0])
+	}
+	selectedMetadataID, ok := queue["playQueueSelectedMetadataItemID"].(string)
+	if !ok {
+		t.Fatalf("playQueueSelectedMetadataItemID=%#v (%T), want string", queue["playQueueSelectedMetadataItemID"], queue["playQueueSelectedMetadataItemID"])
+	}
+	ratingKey, ok := selected["ratingKey"].(string)
+	if !ok {
+		t.Fatalf("Metadata[0].ratingKey=%#v (%T), want string", selected["ratingKey"], selected["ratingKey"])
+	}
+	if selectedMetadataID != ratingKey || ratingKey != wantRatingKey {
+		t.Fatalf("metadata selection=%q ratingKey=%q, want %q", selectedMetadataID, ratingKey, wantRatingKey)
+	}
+	selectedItemID, ok := queue["playQueueSelectedItemID"].(float64)
+	if !ok {
+		t.Fatalf("playQueueSelectedItemID=%#v (%T), want number", queue["playQueueSelectedItemID"], queue["playQueueSelectedItemID"])
+	}
+	playQueueItemID, ok := selected["playQueueItemID"].(float64)
+	if !ok {
+		t.Fatalf("Metadata[0].playQueueItemID=%#v (%T), want number", selected["playQueueItemID"], selected["playQueueItemID"])
+	}
+	if selectedItemID != playQueueItemID {
+		t.Fatalf("queue item selection=%v playQueueItemID=%v", selectedItemID, playQueueItemID)
+	}
+}
+
 func TestRealCatalogStableTypedIDs(t *testing.T) {
 	handler, snapshot, _ := realCatalogTestHandler(t)
 	movieID := movieObjectID(snapshot.Movies[0])
@@ -205,6 +239,7 @@ func TestRealArtworkMediaRangeAndControlSeam(t *testing.T) {
 	}
 
 	queue := decodeContainer(t, performRealRequest(handler, http.MethodPost, "/playQueues?uri="+url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+movieID), "application/json", nil))
+	assertPlayQueueSelection(t, queue, movieID)
 	queueID := int64(queue["playQueueID"].(float64))
 	if queueID <= 1000 || queue["playQueueTotalCount"] != float64(1) {
 		t.Fatalf("bad queue: %#v", queue)
@@ -249,6 +284,7 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 	}
 	for _, contextID := range []string{showID, seasonID} {
 		queue := requestQueue(contextID)
+		assertPlayQueueSelection(t, queue, episodeID)
 		metadata := queue["Metadata"].([]any)[0].(map[string]any)
 		if metadata["ratingKey"] != episodeID || metadata["type"] != "episode" {
 			t.Fatalf("context=%s selected metadata=%#v", contextID, metadata)
@@ -258,18 +294,21 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 		}
 		queueID := int64(queue["playQueueID"].(float64))
 		read := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/playQueues/"+strconv.FormatInt(queueID, 10), "application/json", nil))
+		assertPlayQueueSelection(t, read, episodeID)
 		if read["Metadata"].([]any)[0].(map[string]any)["ratingKey"] != episodeID {
 			t.Fatalf("GET queue did not retain episode: %#v", read)
 		}
 	}
 	showQueueTarget := "/playQueues?type=video&continuous=0&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+showID)
 	showQueue := decodeContainer(t, performRealRequest(handler, http.MethodPost, showQueueTarget, "application/json", nil))
+	assertPlayQueueSelection(t, showQueue, episodeID)
 	showSelected := showQueue["Metadata"].([]any)[0].(map[string]any)
 	if showSelected["ratingKey"] != episodeID || showSelected["type"] != "episode" {
 		t.Fatalf("show-level queue selected %#v", showSelected)
 	}
 	showQueueID := int64(showQueue["playQueueID"].(float64))
 	showQueueRead := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/playQueues/"+strconv.FormatInt(showQueueID, 10), "application/json", nil))
+	assertPlayQueueSelection(t, showQueueRead, episodeID)
 	if showQueueRead["Metadata"].([]any)[0].(map[string]any)["ratingKey"] != episodeID {
 		t.Fatalf("show-level GET queue lost selection: %#v", showQueueRead)
 	}
