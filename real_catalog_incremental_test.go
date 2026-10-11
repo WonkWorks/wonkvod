@@ -110,7 +110,7 @@ func TestIncrementalRefreshReusesUnchangedMoviesAndShows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if provider.movieDetails != 0 || provider.showDetails != 0 || metrics.ReusedUnchanged != 2 || metrics.DetailRequestsSkipped != 2 {
+	if provider.movieDetails != 0 || provider.showDetails != 0 || metrics.ReusedUnchanged != 2 || metrics.DetailRequestsSkipped != 2 || metrics.DetailCompleted != 0 {
 		t.Fatalf("calls movie/show=%d/%d metrics=%#v", provider.movieDetails, provider.showDetails, metrics)
 	}
 	if !reflect.DeepEqual(next.Movies[0].MediaFacts, previous.Movies[0].MediaFacts) || !reflect.DeepEqual(next.Shows[0].Seasons[0].Episodes[0].MediaFacts, previous.Shows[0].Seasons[0].Episodes[0].MediaFacts) {
@@ -144,7 +144,7 @@ func TestIncrementalRefreshClassifiesNewChangedMembershipAndRemoval(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metrics.New != 1 || metrics.Changed != 1 || metrics.MembershipOnly != 1 || metrics.Removed != 1 || metrics.DetailRequests != 2 || metrics.DetailRequestsSkipped != 2 {
+	if metrics.New != 1 || metrics.Changed != 1 || metrics.MembershipOnly != 1 || metrics.Removed != 1 || metrics.DetailRequests != 2 || metrics.DetailCompleted != 2 || metrics.DetailRequestsSkipped != 2 {
 		t.Fatalf("metrics=%#v", metrics)
 	}
 	if provider.movieDetails != 2 || provider.showDetails != 0 {

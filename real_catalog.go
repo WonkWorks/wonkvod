@@ -152,21 +152,30 @@ type catalogRefreshMetrics struct {
 	QuarantineRecovered   int    `json:"quarantine_recovered"`
 	Removed               int    `json:"removed"`
 	DetailRequests        int    `json:"detail_requests"`
+	DetailCompleted       int    `json:"detail_requests_completed"`
 	DetailRequestsSkipped int    `json:"detail_requests_skipped"`
 	Promoted              bool   `json:"promoted"`
 }
 
+type catalogRefreshProgress struct {
+	Phase       string `json:"phase,omitempty"`
+	Completed   int    `json:"completed"`
+	Total       int    `json:"total"`
+	Determinate bool   `json:"determinate"`
+}
+
 type catalogRefreshStatus struct {
-	CatalogAvailable     bool                  `json:"catalog_available"`
-	RefreshRunning       bool                  `json:"refresh_running"`
-	LastRefreshStarted   time.Time             `json:"last_refresh_started,omitempty"`
-	LastRefreshCompleted time.Time             `json:"last_refresh_completed,omitempty"`
-	LastSuccessful       time.Time             `json:"last_successful_refresh,omitempty"`
-	LastRefreshDuration  int64                 `json:"last_refresh_duration_ms,omitempty"`
-	LastRefreshResult    string                `json:"last_refresh_result"`
-	LastRefreshError     string                `json:"last_refresh_error,omitempty"`
-	NextScheduledRefresh time.Time             `json:"next_scheduled_refresh,omitempty"`
-	Metrics              catalogRefreshMetrics `json:"metrics"`
+	CatalogAvailable     bool                   `json:"catalog_available"`
+	RefreshRunning       bool                   `json:"refresh_running"`
+	LastRefreshStarted   time.Time              `json:"last_refresh_started,omitempty"`
+	LastRefreshCompleted time.Time              `json:"last_refresh_completed,omitempty"`
+	LastSuccessful       time.Time              `json:"last_successful_refresh,omitempty"`
+	LastRefreshDuration  int64                  `json:"last_refresh_duration_ms,omitempty"`
+	LastRefreshResult    string                 `json:"last_refresh_result"`
+	LastRefreshError     string                 `json:"last_refresh_error,omitempty"`
+	NextScheduledRefresh time.Time              `json:"next_scheduled_refresh,omitempty"`
+	Metrics              catalogRefreshMetrics  `json:"metrics"`
+	Progress             catalogRefreshProgress `json:"progress"`
 }
 
 func newCatalogRuntime() (*catalogRuntime, error) {
@@ -261,6 +270,7 @@ func (c *catalogRuntime) triggerCatalogBuild(reason string, fullRebuild bool, co
 	c.status.LastRefreshResult = "running"
 	c.status.LastRefreshError = ""
 	c.status.Metrics = catalogRefreshMetrics{Mode: mode, EffectiveConcurrency: concurrency}
+	c.status.Progress = catalogRefreshProgress{Phase: "category_indexes"}
 	c.refreshMu.Unlock()
 	log.Printf("real catalog refresh started reason=%q mode=%q process_age_ms=%d", reason, mode, time.Since(c.startedAt).Milliseconds())
 	go c.runRefresh(reason, fullRebuild, mode, concurrency)
@@ -288,6 +298,7 @@ func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool, mode string
 	}
 	cancel()
 	if err == nil {
+		c.updateRefreshProgress("promoting", 0, 0, false)
 		c.persistMu.Lock()
 		c.mu.RLock()
 		previous := c.snapshot
@@ -315,6 +326,7 @@ func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool, mode string
 	c.status.Metrics = metrics
 	if err != nil {
 		c.status.LastRefreshResult = "failed"
+		c.status.Progress = catalogRefreshProgress{Phase: "failed"}
 		c.status.LastRefreshError = sanitizeStatusError(err)
 		log.Printf("real catalog refresh failed reason=%q; previous snapshot retained: %s", reason, sanitizeStatusError(err))
 	} else {
@@ -322,6 +334,7 @@ func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool, mode string
 		c.status.LastSuccessful = completed
 		c.status.LastRefreshResult = "success"
 		c.status.LastRefreshError = ""
+		c.status.Progress = catalogRefreshProgress{Phase: "complete"}
 		c.logSummary(next)
 		log.Printf("real catalog refresh metrics mode=%q movie_candidates=%d show_candidates=%d reused=%d new=%d changed=%d membership_only=%d quarantine_retries=%d quarantine_recovered=%d removed=%d detail_requests=%d detail_skipped=%d promoted=%t", metrics.Mode, metrics.MovieCandidates, metrics.ShowCandidates, metrics.ReusedUnchanged, metrics.New, metrics.Changed, metrics.MembershipOnly, metrics.QuarantineRetries, metrics.QuarantineRecovered, metrics.Removed, metrics.DetailRequests, metrics.DetailRequestsSkipped, metrics.Promoted)
 	}
@@ -368,6 +381,14 @@ func (c *catalogRuntime) updateRefreshMetrics(metrics catalogRefreshMetrics) {
 	}
 }
 
+func (c *catalogRuntime) updateRefreshProgress(phase string, completed, total int, determinate bool) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if c.refreshing {
+		c.status.Progress = catalogRefreshProgress{Phase: phase, Completed: completed, Total: total, Determinate: determinate && total > 0}
+	}
+}
+
 func (c *catalogRuntime) clientForConfig(config appConfig) (*xtream.Client, error) {
 	if err := validateAppConfig(config, false); err != nil {
 		return nil, err
@@ -385,31 +406,32 @@ func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {
 }
 
 type catalogStatusResponse struct {
-	CatalogAvailable       bool                  `json:"catalog_available"`
-	RefreshRunning         bool                  `json:"refresh_running"`
-	LastRefreshStarted     time.Time             `json:"last_refresh_started,omitempty"`
-	LastRefreshCompleted   time.Time             `json:"last_refresh_completed,omitempty"`
-	LastSuccessful         time.Time             `json:"last_successful_refresh,omitempty"`
-	LastRefreshDuration    int64                 `json:"last_refresh_duration_ms,omitempty"`
-	LastRefreshResult      string                `json:"last_refresh_result"`
-	LastRefreshError       string                `json:"last_refresh_error,omitempty"`
-	NextScheduledRefresh   time.Time             `json:"next_scheduled_refresh,omitempty"`
-	SnapshotGeneratedAt    time.Time             `json:"snapshot_generated_at,omitempty"`
-	SnapshotAgeSeconds     int64                 `json:"snapshot_age_seconds,omitempty"`
-	SnapshotPath           string                `json:"snapshot_path"`
-	SnapshotSize           int64                 `json:"snapshot_size_bytes,omitempty"`
-	Movies                 int                   `json:"movies"`
-	Shows                  int                   `json:"shows"`
-	Seasons                int                   `json:"seasons"`
-	Episodes               int                   `json:"episodes"`
-	Quarantine             int                   `json:"quarantine"`
-	MediaFactsInspected    int                   `json:"media_facts_inspected"`
-	OverlappingMovies      int                   `json:"overlapping_movies"`
-	OverlappingShows       int                   `json:"overlapping_shows"`
-	MaxCategoryMemberships int                   `json:"max_category_memberships"`
-	MovieCategories        []catalogCategory     `json:"movie_categories,omitempty"`
-	TVCategories           []catalogCategory     `json:"tv_categories,omitempty"`
-	Metrics                catalogRefreshMetrics `json:"metrics"`
+	CatalogAvailable       bool                   `json:"catalog_available"`
+	RefreshRunning         bool                   `json:"refresh_running"`
+	LastRefreshStarted     time.Time              `json:"last_refresh_started,omitempty"`
+	LastRefreshCompleted   time.Time              `json:"last_refresh_completed,omitempty"`
+	LastSuccessful         time.Time              `json:"last_successful_refresh,omitempty"`
+	LastRefreshDuration    int64                  `json:"last_refresh_duration_ms,omitempty"`
+	LastRefreshResult      string                 `json:"last_refresh_result"`
+	LastRefreshError       string                 `json:"last_refresh_error,omitempty"`
+	NextScheduledRefresh   time.Time              `json:"next_scheduled_refresh,omitempty"`
+	SnapshotGeneratedAt    time.Time              `json:"snapshot_generated_at,omitempty"`
+	SnapshotAgeSeconds     int64                  `json:"snapshot_age_seconds,omitempty"`
+	SnapshotPath           string                 `json:"snapshot_path"`
+	SnapshotSize           int64                  `json:"snapshot_size_bytes,omitempty"`
+	Movies                 int                    `json:"movies"`
+	Shows                  int                    `json:"shows"`
+	Seasons                int                    `json:"seasons"`
+	Episodes               int                    `json:"episodes"`
+	Quarantine             int                    `json:"quarantine"`
+	MediaFactsInspected    int                    `json:"media_facts_inspected"`
+	OverlappingMovies      int                    `json:"overlapping_movies"`
+	OverlappingShows       int                    `json:"overlapping_shows"`
+	MaxCategoryMemberships int                    `json:"max_category_memberships"`
+	MovieCategories        []catalogCategory      `json:"movie_categories,omitempty"`
+	TVCategories           []catalogCategory      `json:"tv_categories,omitempty"`
+	Metrics                catalogRefreshMetrics  `json:"metrics"`
+	Progress               catalogRefreshProgress `json:"progress"`
 }
 
 func (c *catalogRuntime) catalogStatus() catalogStatusResponse {
@@ -425,7 +447,8 @@ func (c *catalogRuntime) catalogStatus() catalogStatusResponse {
 		NextScheduledRefresh: status.NextScheduledRefresh, SnapshotGeneratedAt: snapshot.GeneratedAt,
 		SnapshotPath: c.statePath, Movies: len(snapshot.Movies), Shows: len(snapshot.Shows), Quarantine: len(snapshot.Quarantine),
 		MovieCategories: snapshotMovieCategories(snapshot), TVCategories: snapshotTVCategories(snapshot),
-		Metrics: status.Metrics,
+		Metrics:  status.Metrics,
+		Progress: status.Progress,
 	}
 	if !snapshot.GeneratedAt.IsZero() {
 		result.SnapshotAgeSeconds = int64(time.Since(snapshot.GeneratedAt).Seconds())
@@ -481,6 +504,7 @@ func (c *catalogRuntime) fetchCatalog(ctx context.Context, config appConfig, pre
 
 func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appConfig, previous canonicalSnapshot, fullRebuild bool, mode string) (canonicalSnapshot, *xtream.Client, catalogRefreshMetrics, error) {
 	metrics := catalogRefreshMetrics{Mode: mode, EffectiveConcurrency: config.Catalog.RefreshConcurrency}
+	c.updateRefreshProgress("category_indexes", 0, 0, false)
 	client, err := c.clientForConfig(config)
 	if err != nil {
 		return canonicalSnapshot{}, nil, metrics, err
@@ -564,6 +588,7 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	result.TVCategory = result.TVCategories[0]
 	metrics.MovieCandidates = len(movieItems)
 	metrics.ShowCandidates = len(showItems)
+	c.updateRefreshProgress("comparing", 0, 0, false)
 	log.Printf("real catalog refresh timing phase=top_level duration_ms=%d movies=%d shows=%d tv_categories=%d", time.Since(topLevelStarted).Milliseconds(), len(movieItems), len(showItems), len(result.TVCategories))
 
 	movieDetailsStarted := time.Now()
@@ -651,6 +676,9 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	}
 	metrics.DetailRequests += len(movieWorkItems)
 	c.updateRefreshMetrics(metrics)
+	if len(movieWorkItems) > 0 {
+		c.updateRefreshProgress("enriching_movies", 0, len(movieWorkItems), true)
+	}
 	type movieResult struct {
 		movie    canonicalMovie
 		q        *quarantineEntry
@@ -699,7 +727,10 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 		}
 	}()
 	go func() { workers.Wait(); close(movieResults) }()
+	movieCompleted := 0
 	for item := range movieResults {
+		movieCompleted++
+		metrics.DetailCompleted++
 		if item.q != nil {
 			movieFailures++
 			result.Quarantine = append(result.Quarantine, *item.q)
@@ -711,6 +742,12 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 			if item.retry {
 				metrics.QuarantineRecovered++
 			}
+		}
+		c.updateRefreshMetrics(metrics)
+		if movieCompleted < len(movieWorkItems) {
+			c.updateRefreshProgress("enriching_movies", movieCompleted, len(movieWorkItems), true)
+		} else {
+			c.updateRefreshProgress("comparing", 0, 0, false)
 		}
 	}
 	if err := ctx.Err(); err != nil {
@@ -768,6 +805,9 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	}
 	metrics.DetailRequests += len(showWorkItems)
 	c.updateRefreshMetrics(metrics)
+	if len(showWorkItems) > 0 {
+		c.updateRefreshProgress("enriching_shows", 0, len(showWorkItems), true)
+	}
 	type showResult struct {
 		show       canonicalShow
 		q          *quarantineEntry
@@ -837,7 +877,10 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 		}
 	}()
 	go func() { workers.Wait(); close(showResults) }()
+	showCompleted := 0
 	for item := range showResults {
+		showCompleted++
+		metrics.DetailCompleted++
 		if item.q != nil {
 			showFailures++
 			result.Quarantine = append(result.Quarantine, *item.q)
@@ -851,6 +894,12 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 				metrics.QuarantineRecovered++
 			}
 		}
+		c.updateRefreshMetrics(metrics)
+		if showCompleted < len(showWorkItems) {
+			c.updateRefreshProgress("enriching_shows", showCompleted, len(showWorkItems), true)
+		} else {
+			c.updateRefreshProgress("validating", 0, 0, false)
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return canonicalSnapshot{}, nil, metrics, fmt.Errorf("real catalog: TV detail traversal did not complete: %w", err)
@@ -860,6 +909,7 @@ func (c *catalogRuntime) fetchCatalogWithMode(ctx context.Context, config appCon
 	}
 	c.updateRefreshMetrics(metrics)
 
+	c.updateRefreshProgress("validating", 0, 0, false)
 	sort.Slice(result.Movies, func(i, j int) bool {
 		if strings.EqualFold(result.Movies[i].Title, result.Movies[j].Title) {
 			return result.Movies[i].SourceID < result.Movies[j].SourceID

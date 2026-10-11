@@ -265,7 +265,9 @@ func TestSetupUIHardeningContract(t *testing.T) {
 	for _, required := range []string{
 		`href="/categories">Categories`, `<h1>Categories</h1>`, `Movie Categories`, `TV Categories`,
 		`Categories saved.`, `A catalog refresh is required`, `Refresh Now`, `Saving…`,
-		`Refreshing catalog…`, `Your previous catalog is still active.`, `setTimeout(overview,3000)`,
+		`Refreshing catalog — `, `Your previous catalog is still active.`, `setTimeout(overview,1500)`,
+		`progress-fill indeterminate`, `p.completed+' / '+p.total`, `Math.min(99`, `c.refresh_running?'disabled'`,
+		`Fetching category indexes`, `Comparing with current catalog`, `Enriching movie metadata`, `Enriching TV metadata`, `Validating snapshot`, `Promoting snapshot`,
 		`wonkvod-theme`, `<option value="system">System</option>`, `<option value="light">Light</option>`, `<option value="dark">Dark</option>`,
 		`wonkvodlogo_`, `wonkvodlogo_light.png`, `Connection failed.`, `Provider settings saved.`, `Settings saved.`,
 		`Catalog refresh concurrency`, `Lower values are friendlier to providers.`, `This does not control simultaneous video playback.`,
@@ -280,6 +282,29 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		if strings.Contains(body, forbidden) {
 			t.Fatalf("setup UI retains raw/legacy surface %q", forbidden)
 		}
+	}
+}
+
+func TestRefreshProgressStatusPhases(t *testing.T) {
+	_, runtime := setupFixture(t)
+	runtime.refreshMu.Lock()
+	runtime.refreshing = true
+	runtime.status.RefreshRunning = true
+	runtime.status.Progress = catalogRefreshProgress{Phase: "category_indexes"}
+	runtime.refreshMu.Unlock()
+	status := runtime.catalogStatus()
+	if status.Progress.Phase != "category_indexes" || status.Progress.Determinate {
+		t.Fatalf("early progress=%#v", status.Progress)
+	}
+	runtime.updateRefreshProgress("enriching_movies", 238, 376, true)
+	status = runtime.catalogStatus()
+	if !status.Progress.Determinate || status.Progress.Completed != 238 || status.Progress.Total != 376 {
+		t.Fatalf("enrichment progress=%#v", status.Progress)
+	}
+	runtime.updateRefreshProgress("validating", 0, 0, false)
+	status = runtime.catalogStatus()
+	if status.Progress.Phase != "validating" || status.Progress.Determinate || status.Progress.Total != 0 {
+		t.Fatalf("validation progress=%#v", status.Progress)
 	}
 }
 
@@ -398,6 +423,9 @@ func TestCatalogRefreshSerializationAndFallback(t *testing.T) {
 	if status.LastRefreshResult != "failed" || !status.CatalogAvailable || len(runtime.snapshotCopy().Movies) != 1 {
 		t.Fatalf("failed refresh status/snapshot = %#v", status)
 	}
+	if status.RefreshRunning || status.Progress.Phase != "failed" {
+		t.Fatalf("failed refresh retained running progress: %#v", status.Progress)
+	}
 
 	runtime.fetcher = func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error) {
 		return canonicalSnapshot{Version: realCatalogVersion, GeneratedAt: time.Now().UTC(), Movies: []canonicalMovie{{SourceID: "movie"}, {SourceID: "new"}}}, nil, nil
@@ -411,6 +439,9 @@ func TestCatalogRefreshSerializationAndFallback(t *testing.T) {
 	}
 	if got := runtime.snapshotCopy(); len(got.Movies) != 2 || got.Movies[0].MediaFacts.State != "inspected" {
 		t.Fatalf("successful atomic promotion/media facts = %#v", got.Movies)
+	}
+	if status := runtime.catalogStatus(); status.RefreshRunning || status.Progress.Phase != "complete" || status.Movies != 2 {
+		t.Fatalf("successful refresh did not transition/update counts: %#v", status)
 	}
 	if persisted, err := loadCanonicalSnapshot(runtime.statePath); err != nil || len(persisted.Movies) != 2 {
 		t.Fatalf("promoted snapshot was not persisted atomically: movies=%d err=%v", len(persisted.Movies), err)
