@@ -7,6 +7,7 @@ RUN go mod download
 COPY *.go ./
 COPY internal ./internal
 COPY fixtures ./fixtures
+COPY assets ./assets
 ARG VCS_REF=unknown
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/wonkvod .
 
@@ -18,5 +19,5 @@ RUN apk add --no-cache ca-certificates ffmpeg \
     && rm /usr/bin/ffmpeg
 COPY --from=build /out/wonkvod /usr/local/bin/wonkvod
 USER 65532:65532
-EXPOSE 32499
+EXPOSE 32499 32501
 ENTRYPOINT ["/usr/local/bin/wonkvod"]

@@ -2243,6 +2243,7 @@ func handleNotifications(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	processStarted := time.Now()
 	http.HandleFunc("/identity", func(w http.ResponseWriter, r *http.Request) {
 		logRequest(r)
 		if handleOptions(w, r) {
@@ -2504,6 +2505,18 @@ func main() {
 	}
 	if strings.TrimSpace(mode) == "" {
 		mode = "synthetic"
+	}
+	if setup, ok := handler.(interface{ SetupHandler() http.Handler }); ok {
+		webAddr := strings.TrimSpace(os.Getenv("WONKVOD_WEB_ADDR"))
+		if webAddr == "" {
+			webAddr = ":32501"
+		}
+		go func() {
+			log.Printf("WonkVOD web setup listening on %s ready_ms=%d", webAddr, time.Since(processStarted).Milliseconds())
+			if err := http.ListenAndServe(webAddr, setup.SetupHandler()); err != nil {
+				log.Fatalf("WonkVOD web setup server: %v", err)
+			}
+		}()
 	}
 	log.Printf("WonkVOD test server listening on %s mode=%s", addr, mode)
 	log.Fatal(http.ListenAndServe(addr, traceRequests(handler, log.Default())))

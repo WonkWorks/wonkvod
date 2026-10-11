@@ -92,19 +92,22 @@ type quarantineEntry struct {
 }
 
 type canonicalSnapshot struct {
-	Version       int               `json:"version"`
-	GeneratedAt   time.Time         `json:"generated_at"`
-	MovieCategory catalogCategory   `json:"movie_category"`
-	TVCategory    catalogCategory   `json:"tv_category"`
-	TVCategories  []catalogCategory `json:"tv_categories,omitempty"`
-	Movies        []canonicalMovie  `json:"movies"`
-	Shows         []canonicalShow   `json:"shows"`
-	Quarantine    []quarantineEntry `json:"quarantine,omitempty"`
+	Version         int               `json:"version"`
+	GeneratedAt     time.Time         `json:"generated_at"`
+	MovieCategory   catalogCategory   `json:"movie_category"`
+	MovieCategories []catalogCategory `json:"movie_categories,omitempty"`
+	TVCategory      catalogCategory   `json:"tv_category"`
+	TVCategories    []catalogCategory `json:"tv_categories,omitempty"`
+	Movies          []canonicalMovie  `json:"movies"`
+	Shows           []canonicalShow   `json:"shows"`
+	Quarantine      []quarantineEntry `json:"quarantine,omitempty"`
 }
 
 type catalogRuntime struct {
 	client    *xtream.Client
 	statePath string
+	config    *configStore
+	startedAt time.Time
 
 	mu           sync.RWMutex
 	snapshot     canonicalSnapshot
@@ -112,74 +115,151 @@ type catalogRuntime struct {
 	capabilities map[string]xtream.CapabilityProbe
 	inspections  sync.Map
 	persistMu    sync.Mutex
+	refreshMu    sync.Mutex
+	refreshing   bool
+	status       catalogRefreshStatus
+	scheduleWake chan struct{}
+	fetcher      func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error)
+}
+
+type catalogRefreshStatus struct {
+	CatalogAvailable     bool      `json:"catalog_available"`
+	RefreshRunning       bool      `json:"refresh_running"`
+	LastRefreshStarted   time.Time `json:"last_refresh_started,omitempty"`
+	LastRefreshCompleted time.Time `json:"last_refresh_completed,omitempty"`
+	LastSuccessful       time.Time `json:"last_successful_refresh,omitempty"`
+	LastRefreshDuration  int64     `json:"last_refresh_duration_ms,omitempty"`
+	LastRefreshResult    string    `json:"last_refresh_result"`
+	LastRefreshError     string    `json:"last_refresh_error,omitempty"`
+	NextScheduledRefresh time.Time `json:"next_scheduled_refresh,omitempty"`
 }
 
 func newCatalogRuntime() (*catalogRuntime, error) {
-	baseURL := strings.TrimSpace(os.Getenv("WONKVOD_XTREAM_URL"))
-	username := strings.TrimSpace(os.Getenv("WONKVOD_XTREAM_USER"))
-	password := strings.TrimSpace(os.Getenv("WONKVOD_XTREAM_PASS"))
-	if baseURL == "" || username == "" || password == "" {
-		return nil, errors.New("real catalog: Xtream configuration is incomplete")
-	}
-	client, err := xtream.NewClient(&http.Client{Timeout: providerRequestTimeout}, baseURL, username, password)
-	if err != nil {
-		return nil, err
-	}
 	statePath := strings.TrimSpace(os.Getenv("WONKVOD_CATALOG_STATE"))
 	if statePath == "" {
 		statePath = defaultCatalogStatePath
 	}
-	runtime := &catalogRuntime{client: client, statePath: statePath, sources: make(map[string]*xtream.VODSource), capabilities: make(map[string]xtream.CapabilityProbe)}
-	previous, loadErr := loadCanonicalSnapshot(statePath)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-	current, refreshErr := runtime.fetch(ctx)
-	if refreshErr != nil {
-		if loadErr != nil || previous.Version != realCatalogVersion {
-			return nil, fmt.Errorf("real catalog: initial refresh failed and no usable snapshot exists: %w", refreshErr)
-		}
-		log.Printf("real catalog refresh failed; retaining snapshot generated=%s", previous.GeneratedAt.Format(time.RFC3339))
-		runtime.snapshot = previous
+	config, err := loadConfigStore(configStatePath())
+	if err != nil {
+		return nil, err
+	}
+	runtime := &catalogRuntime{
+		statePath: statePath, config: config, startedAt: time.Now(),
+		sources: make(map[string]*xtream.VODSource), capabilities: make(map[string]xtream.CapabilityProbe),
+		scheduleWake: make(chan struct{}, 1),
+	}
+	if client, clientErr := runtime.clientForConfig(config.snapshot()); clientErr == nil {
+		runtime.client = client
 	} else {
-		mergeMediaFacts(&current, previous)
-		runtime.snapshot = current
-		if err := saveCanonicalSnapshot(statePath, current); err != nil {
-			return nil, fmt.Errorf("real catalog: persist snapshot: %w", err)
+		log.Printf("provider configuration unavailable: %s", sanitizeStatusError(clientErr))
+	}
+	previous, loadErr := loadCanonicalSnapshot(statePath)
+	if loadErr == nil && previous.Version == realCatalogVersion {
+		runtime.snapshot = previous
+		runtime.status.CatalogAvailable = true
+		runtime.status.LastSuccessful = previous.GeneratedAt
+		runtime.status.LastRefreshResult = "loaded_snapshot"
+		runtime.logSummary(previous)
+	} else {
+		runtime.status.LastRefreshResult = "no_catalog"
+		if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+			runtime.status.LastRefreshError = "stored catalog is unavailable: " + sanitizeStatusError(loadErr)
 		}
 	}
-	runtime.logSummary(runtime.snapshot)
 	go runtime.refreshLoop()
+	go runtime.triggerRefresh("startup")
 	return runtime, nil
 }
 
 func (c *catalogRuntime) refreshLoop() {
-	ticker := time.NewTicker(defaultCatalogRefresh)
-	defer ticker.Stop()
-	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		next, err := c.fetch(ctx)
-		cancel()
-		if err != nil {
-			log.Printf("real catalog background refresh failed; previous snapshot retained")
-			continue
+	for {
+		interval := c.config.refreshInterval()
+		c.refreshMu.Lock()
+		c.status.NextScheduledRefresh = time.Now().Add(interval)
+		next := c.status.NextScheduledRefresh
+		c.refreshMu.Unlock()
+		timer := time.NewTimer(time.Until(next))
+		select {
+		case <-timer.C:
+			c.triggerRefresh("scheduled")
+		case <-c.scheduleWake:
+			if !timer.Stop() {
+				<-timer.C
+			}
 		}
+	}
+}
+
+func (c *catalogRuntime) triggerRefresh(reason string) bool {
+	c.refreshMu.Lock()
+	if c.refreshing {
+		c.refreshMu.Unlock()
+		return false
+	}
+	c.refreshing = true
+	c.status.RefreshRunning = true
+	c.status.LastRefreshStarted = time.Now().UTC()
+	c.status.LastRefreshResult = "running"
+	c.status.LastRefreshError = ""
+	c.refreshMu.Unlock()
+	log.Printf("real catalog refresh started reason=%q process_age_ms=%d", reason, time.Since(c.startedAt).Milliseconds())
+	go c.runRefresh(reason)
+	return true
+}
+
+func (c *catalogRuntime) runRefresh(reason string) {
+	started := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+	fetcher := c.fetcher
+	if fetcher == nil {
+		fetcher = c.fetch
+	}
+	next, client, err := fetcher(ctx, c.config.snapshot())
+	cancel()
+	if err == nil {
 		c.persistMu.Lock()
-		c.mu.Lock()
-		mergeMediaFacts(&next, c.snapshot)
-		c.mu.Unlock()
-		if err := saveCanonicalSnapshot(c.statePath, next); err != nil {
-			c.persistMu.Unlock()
-			log.Printf("real catalog snapshot persist failed; previous snapshot retained")
-			continue
+		c.mu.RLock()
+		previous := c.snapshot
+		c.mu.RUnlock()
+		mergeMediaFacts(&next, previous)
+		if saveErr := saveCanonicalSnapshot(c.statePath, next); saveErr != nil {
+			err = saveErr
+		} else {
+			c.mu.Lock()
+			c.snapshot = next
+			c.client = client
+			c.sources = make(map[string]*xtream.VODSource)
+			c.capabilities = make(map[string]xtream.CapabilityProbe)
+			c.mu.Unlock()
 		}
-		c.mu.Lock()
-		c.snapshot = next
-		c.sources = make(map[string]*xtream.VODSource)
-		c.capabilities = make(map[string]xtream.CapabilityProbe)
-		c.mu.Unlock()
 		c.persistMu.Unlock()
+	}
+	completed := time.Now().UTC()
+	c.refreshMu.Lock()
+	c.refreshing = false
+	c.status.RefreshRunning = false
+	c.status.LastRefreshCompleted = completed
+	c.status.LastRefreshDuration = time.Since(started).Milliseconds()
+	if err != nil {
+		c.status.LastRefreshResult = "failed"
+		c.status.LastRefreshError = sanitizeStatusError(err)
+		log.Printf("real catalog refresh failed reason=%q; previous snapshot retained: %s", reason, sanitizeStatusError(err))
+	} else {
+		c.status.CatalogAvailable = true
+		c.status.LastSuccessful = completed
+		c.status.LastRefreshResult = "success"
+		c.status.LastRefreshError = ""
 		c.logSummary(next)
 	}
+	c.status.NextScheduledRefresh = completed.Add(c.config.refreshInterval())
+	c.refreshMu.Unlock()
+}
+
+func (c *catalogRuntime) clientForConfig(config appConfig) (*xtream.Client, error) {
+	if err := validateAppConfig(config, false); err != nil {
+		return nil, err
+	}
+	return xtream.NewClient(&http.Client{Timeout: providerRequestTimeout}, config.Provider.BaseURL, config.Provider.Username, config.Provider.Password)
 }
 
 func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {
@@ -191,49 +271,128 @@ func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {
 	return result
 }
 
-func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
+type catalogStatusResponse struct {
+	CatalogAvailable     bool      `json:"catalog_available"`
+	RefreshRunning       bool      `json:"refresh_running"`
+	LastRefreshStarted   time.Time `json:"last_refresh_started,omitempty"`
+	LastRefreshCompleted time.Time `json:"last_refresh_completed,omitempty"`
+	LastSuccessful       time.Time `json:"last_successful_refresh,omitempty"`
+	LastRefreshDuration  int64     `json:"last_refresh_duration_ms,omitempty"`
+	LastRefreshResult    string    `json:"last_refresh_result"`
+	LastRefreshError     string    `json:"last_refresh_error,omitempty"`
+	NextScheduledRefresh time.Time `json:"next_scheduled_refresh,omitempty"`
+	SnapshotGeneratedAt  time.Time `json:"snapshot_generated_at,omitempty"`
+	SnapshotAgeSeconds   int64     `json:"snapshot_age_seconds,omitempty"`
+	SnapshotPath         string    `json:"snapshot_path"`
+	SnapshotSize         int64     `json:"snapshot_size_bytes,omitempty"`
+	Movies               int       `json:"movies"`
+	Shows                int       `json:"shows"`
+	Seasons              int       `json:"seasons"`
+	Episodes             int       `json:"episodes"`
+	Quarantine           int       `json:"quarantine"`
+	MediaFactsInspected  int       `json:"media_facts_inspected"`
+}
+
+func (c *catalogRuntime) catalogStatus() catalogStatusResponse {
+	c.refreshMu.Lock()
+	status := c.status
+	c.refreshMu.Unlock()
+	snapshot := c.snapshotCopy()
+	result := catalogStatusResponse{
+		CatalogAvailable: status.CatalogAvailable, RefreshRunning: status.RefreshRunning,
+		LastRefreshStarted: status.LastRefreshStarted, LastRefreshCompleted: status.LastRefreshCompleted,
+		LastSuccessful: status.LastSuccessful, LastRefreshDuration: status.LastRefreshDuration,
+		LastRefreshResult: status.LastRefreshResult, LastRefreshError: status.LastRefreshError,
+		NextScheduledRefresh: status.NextScheduledRefresh, SnapshotGeneratedAt: snapshot.GeneratedAt,
+		SnapshotPath: c.statePath, Movies: len(snapshot.Movies), Shows: len(snapshot.Shows), Quarantine: len(snapshot.Quarantine),
+	}
+	if !snapshot.GeneratedAt.IsZero() {
+		result.SnapshotAgeSeconds = int64(time.Since(snapshot.GeneratedAt).Seconds())
+	}
+	if info, err := os.Stat(c.statePath); err == nil {
+		result.SnapshotSize = info.Size()
+	}
+	for _, movie := range snapshot.Movies {
+		if movie.MediaFacts.State == "inspected" {
+			result.MediaFactsInspected++
+		}
+	}
+	for _, show := range snapshot.Shows {
+		result.Seasons += len(show.Seasons)
+		for _, season := range show.Seasons {
+			result.Episodes += len(season.Episodes)
+			for _, episode := range season.Episodes {
+				if episode.MediaFacts.State == "inspected" {
+					result.MediaFactsInspected++
+				}
+			}
+		}
+	}
+	return result
+}
+
+func (c *catalogRuntime) fetch(ctx context.Context, config appConfig) (canonicalSnapshot, *xtream.Client, error) {
+	client, err := c.clientForConfig(config)
+	if err != nil {
+		return canonicalSnapshot{}, nil, err
+	}
 	refreshStarted := time.Now()
 	topLevelStarted := refreshStarted
-	movieCategories, err := c.client.VODCategories(ctx)
+	movieCategories, err := client.VODCategories(ctx)
 	if err != nil {
-		return canonicalSnapshot{}, err
+		return canonicalSnapshot{}, nil, err
 	}
-	tvCategories, err := c.client.SeriesCategories(ctx)
+	tvCategories, err := client.SeriesCategories(ctx)
 	if err != nil {
-		return canonicalSnapshot{}, err
+		return canonicalSnapshot{}, nil, err
 	}
-	movieCategory, err := selectCategory(movieCategories, realMovieCategoryName)
-	if err != nil {
-		return canonicalSnapshot{}, err
+	result := canonicalSnapshot{Version: realCatalogVersion, GeneratedAt: time.Now().UTC()}
+	type categorizedMovie struct {
+		item     xtream.Movie
+		category catalogCategory
 	}
-	movieItems, err := c.client.Movies(ctx, movieCategory.ID)
-	if err != nil {
-		return canonicalSnapshot{}, err
+	var movieItems []categorizedMovie
+	seenMovies := make(map[string]string)
+	for _, categoryID := range config.Libraries.MovieCategoryIDs {
+		category, categoryErr := selectCategoryByID(movieCategories, categoryID)
+		if categoryErr != nil {
+			return canonicalSnapshot{}, nil, categoryErr
+		}
+		items, movieErr := client.Movies(ctx, category.ID)
+		if movieErr != nil {
+			return canonicalSnapshot{}, nil, movieErr
+		}
+		selected := catalogCategory{ID: category.ID, Name: category.Name, Count: len(items)}
+		result.MovieCategories = append(result.MovieCategories, selected)
+		for _, item := range items {
+			if previous, exists := seenMovies[item.ID]; exists {
+				return canonicalSnapshot{}, nil, fmt.Errorf("real catalog: movie %s appears in both movie categories %s and %s", item.ID, previous, selected.ID)
+			}
+			seenMovies[item.ID] = selected.ID
+			movieItems = append(movieItems, categorizedMovie{item: item, category: selected})
+		}
 	}
-	result := canonicalSnapshot{
-		Version: realCatalogVersion, GeneratedAt: time.Now().UTC(),
-		MovieCategory: catalogCategory{ID: movieCategory.ID, Name: movieCategory.Name, Count: len(movieItems)},
-	}
+	result.MovieCategory = result.MovieCategories[0]
 	type categorizedSeries struct {
 		item     xtream.Series
 		category catalogCategory
 	}
 	var showItems []categorizedSeries
 	seenSeries := make(map[string]string)
-	for _, target := range realTVCategoryTargets {
-		category, categoryErr := selectCategoryByIDAndName(tvCategories, target.ID, target.Name)
+	for _, categoryID := range config.Libraries.TVCategoryIDs {
+		category, categoryErr := selectCategoryByID(tvCategories, categoryID)
 		if categoryErr != nil {
-			return canonicalSnapshot{}, categoryErr
+			return canonicalSnapshot{}, nil, categoryErr
 		}
-		items, seriesErr := c.client.Series(ctx, category.ID)
+		items, seriesErr := client.Series(ctx, category.ID)
 		if seriesErr != nil {
-			return canonicalSnapshot{}, seriesErr
+			return canonicalSnapshot{}, nil, seriesErr
 		}
 		selected := catalogCategory{ID: category.ID, Name: category.Name, Count: len(items)}
 		result.TVCategories = append(result.TVCategories, selected)
 		for _, item := range items {
 			if previous, exists := seenSeries[item.ID]; exists {
-				return canonicalSnapshot{}, fmt.Errorf("real catalog: series %s appears in both TV categories %s and %s", item.ID, previous, selected.ID)
+				return canonicalSnapshot{}, nil, fmt.Errorf("real catalog: series %s appears in both TV categories %s and %s", item.ID, previous, selected.ID)
 			}
 			seenSeries[item.ID] = selected.ID
 			showItems = append(showItems, categorizedSeries{item: item, category: selected})
@@ -249,7 +408,7 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 		movie canonicalMovie
 		q     *quarantineEntry
 	}
-	movieJobs := make(chan xtream.Movie)
+	movieJobs := make(chan categorizedMovie)
 	movieResults := make(chan movieResult)
 	var workers sync.WaitGroup
 	workerCount := providerDetailWorkers
@@ -260,8 +419,9 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 		workers.Add(1)
 		go func() {
 			defer workers.Done()
-			for item := range movieJobs {
-				details, detailErr := c.client.MovieDetails(ctx, item.ID)
+			for job := range movieJobs {
+				item := job.item
+				details, detailErr := client.MovieDetails(ctx, item.ID)
 				if detailErr != nil {
 					movieResults <- movieResult{q: &quarantineEntry{Kind: "movie", SourceID: item.ID, Reason: "metadata request failed"}}
 					continue
@@ -273,7 +433,7 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 					continue
 				}
 				movieResults <- movieResult{movie: canonicalMovie{
-					SourceID: item.ID, Category: result.MovieCategory, Title: title,
+					SourceID: item.ID, Category: job.category, Title: title,
 					Year: firstNonEmptyString(details.Year, item.Year), Extension: extension,
 					Revision: item.Revision, Details: details,
 				}}
@@ -315,7 +475,7 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 			defer workers.Done()
 			for job := range showJobs {
 				item := job.item
-				details, detailErr := c.client.SeriesDetails(ctx, item.ID)
+				details, detailErr := client.SeriesDetails(ctx, item.ID)
 				if detailErr != nil {
 					showResults <- showResult{q: &quarantineEntry{Kind: "show", SourceID: item.ID, Reason: "series traversal failed"}}
 					continue
@@ -381,11 +541,20 @@ func (c *catalogRuntime) fetch(ctx context.Context) (canonicalSnapshot, error) {
 		return strings.ToLower(result.Shows[i].Title) < strings.ToLower(result.Shows[j].Title)
 	})
 	if err := validateStableIDs(result); err != nil {
-		return canonicalSnapshot{}, err
+		return canonicalSnapshot{}, nil, err
 	}
 	log.Printf("real catalog refresh timing phase=tv_details duration_ms=%d accepted=%d quarantine_total=%d", time.Since(tvDetailsStarted).Milliseconds(), len(result.Shows), len(result.Quarantine))
 	log.Printf("real catalog refresh timing phase=total duration_ms=%d", time.Since(refreshStarted).Milliseconds())
-	return result, nil
+	return result, client, nil
+}
+
+func selectCategoryByID(categories []xtream.Category, id string) (xtream.Category, error) {
+	for _, category := range categories {
+		if category.ID == id {
+			return category, nil
+		}
+	}
+	return xtream.Category{}, fmt.Errorf("real catalog: category ID %q was not returned by provider", id)
 }
 
 func selectCategory(categories []xtream.Category, name string) (xtream.Category, error) {
@@ -709,16 +878,20 @@ func (c *catalogRuntime) source(item catalogPlayable) (*xtream.VODSource, error)
 	key := item.Kind + ":" + item.SourceID
 	c.mu.RLock()
 	existing := c.sources[key]
+	client := c.client
 	c.mu.RUnlock()
 	if existing != nil {
 		return existing, nil
 	}
+	if client == nil {
+		return nil, errors.New("provider is not configured")
+	}
 	var source *xtream.VODSource
 	var err error
 	if item.Kind == "movie" {
-		source, err = c.client.MovieSource(item.SourceID, item.Extension)
+		source, err = client.MovieSource(item.SourceID, item.Extension)
 	} else {
-		source, err = c.client.EpisodeSource(item.SourceID, item.Extension)
+		source, err = client.EpisodeSource(item.SourceID, item.Extension)
 	}
 	if err != nil {
 		return nil, err

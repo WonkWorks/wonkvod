@@ -25,6 +25,9 @@ services:
       WONKVOD_PROVIDER_FEATURE_VARIANT: "${WONKVOD_PROVIDER_FEATURE_VARIANT:-real}"
       WONKVOD_PMS_UPSTREAM: "http://plex-identity:32400"
       WONKVOD_CATALOG_STATE: "/var/lib/wonkvod/catalog.json"
+      WONKVOD_CONFIG_STATE: "/var/lib/wonkvod/config.json"
+      WONKVOD_WEB_ADDR: ":32501"
+      WONKVOD_SECURE_URI: "https://192-0-2-22.fixture.example.invalid:32499"
     volumes:
       - type: bind
         source: /opt/plex-identity/test2.mp4
@@ -39,11 +42,13 @@ services:
         bind:
           create_host_path: false
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:32499/identity"]
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:32501/healthz"]
       interval: 10s
       timeout: 3s
       retries: 6
       start_period: 5s
+    ports:
+      - "192.0.2.22:32501:32501/tcp"
     networks:
       - facade
       - plex-identity

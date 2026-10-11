@@ -24,6 +24,7 @@ import (
 type realCatalogHandler struct {
 	catalog     *catalogRuntime
 	passthrough http.Handler
+	upstreamURL string
 	httpClient  *http.Client
 	queueID     atomic.Int64
 	mediaID     atomic.Uint64
@@ -47,7 +48,7 @@ func newRealCatalogHandler(upstream string) (http.Handler, error) {
 		return nil, err
 	}
 	handler := &realCatalogHandler{
-		catalog: catalog, passthrough: passthrough,
+		catalog: catalog, passthrough: passthrough, upstreamURL: upstream,
 		httpClient: &http.Client{Timeout: 45 * time.Second}, queues: make(map[int64]virtualPlayQueue),
 	}
 	handler.queueID.Store(1000)

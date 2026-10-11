@@ -33,8 +33,9 @@ verify_image() {
 
 wait_for_backend() {
 	count=0
-	# Initial catalog traversal is intentionally completed before the HTTP
-	# listener starts. Allow three minutes for larger selected category sets.
+	# A valid persisted catalog makes health available before the asynchronous
+	# provider refresh completes. Cold bootstrap remains unhealthy until its
+	# first usable snapshot is promoted.
 	while [ "$count" -lt 90 ]; do
 		state=$(docker inspect --format '{{.State.Status}}' wonkvod-backend 2>/dev/null || true)
 		health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' wonkvod-backend 2>/dev/null || true)
