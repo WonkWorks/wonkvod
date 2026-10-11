@@ -80,6 +80,14 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeMovieList(w, r)
 	case requestPath == "/library/sections/2/all" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeTVList(w, r)
+	case requestPath == "/library/sections/1/categories" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeCategories(w, r, 1, false)
+	case requestPath == "/library/sections/2/categories" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeCategories(w, r, 2, false)
+	case requestPath == "/library/sections/1/genre" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeCategories(w, r, 1, true)
+	case requestPath == "/library/sections/2/genre" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeCategories(w, r, 2, true)
 	case strings.HasPrefix(requestPath, "/library/sections/1/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeEmptyNavigation(w, 1)
 	case strings.HasPrefix(requestPath, "/library/sections/2/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
@@ -242,6 +250,7 @@ func reverseShows(items []canonicalShow) {
 func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.catalog.snapshotCopy()
 	items := append([]canonicalMovie(nil), snapshot.Movies...)
+	items = filterMoviesByGenre(items, r.URL.Query().Get("genre"))
 	if reverseRequested(r) {
 		reverseMovies(items)
 	}
@@ -256,7 +265,8 @@ func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Reque
 
 func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.catalog.snapshotCopy()
-	if r.URL.Query().Get("type") == "4" {
+	genre := r.URL.Query().Get("genre")
+	if genre == "" && r.URL.Query().Get("type") == "4" {
 		var episodes []tvItem
 		for _, show := range snapshot.Shows {
 			for _, season := range show.Seasons {
@@ -275,6 +285,7 @@ func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	items := append([]canonicalShow(nil), snapshot.Shows...)
+	items = filterShowsByGenre(items, genre)
 	if reverseRequested(r) {
 		reverseShows(items)
 	}
