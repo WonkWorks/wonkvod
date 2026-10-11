@@ -126,17 +126,19 @@ type catalogRuntime struct {
 	config    *configStore
 	startedAt time.Time
 
-	mu           sync.RWMutex
-	snapshot     canonicalSnapshot
-	sources      map[string]*xtream.VODSource
-	capabilities map[string]xtream.CapabilityProbe
-	inspections  sync.Map
-	persistMu    sync.Mutex
-	refreshMu    sync.Mutex
-	refreshing   bool
-	status       catalogRefreshStatus
-	scheduleWake chan struct{}
-	fetcher      func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error)
+	mu                    sync.RWMutex
+	snapshot              canonicalSnapshot
+	indexes               *catalogIndexes
+	sources               map[string]*xtream.VODSource
+	capabilities          map[string]xtream.CapabilityProbe
+	inspections           sync.Map
+	backgroundInspections sync.Map
+	persistMu             sync.Mutex
+	refreshMu             sync.Mutex
+	refreshing            bool
+	status                catalogRefreshStatus
+	scheduleWake          chan struct{}
+	fetcher               func(context.Context, appConfig) (canonicalSnapshot, *xtream.Client, error)
 }
 
 type catalogRefreshMetrics struct {
@@ -200,6 +202,9 @@ func newCatalogRuntime() (*catalogRuntime, error) {
 	previous, loadErr := loadCanonicalSnapshot(statePath)
 	if loadErr == nil && previous.Version == realCatalogVersion {
 		runtime.snapshot = previous
+		indexStarted := time.Now()
+		runtime.indexes = buildCatalogIndexes(previous)
+		log.Printf("catalog read indexes built reason=%q duration_ms=%d movies=%d shows=%d", "startup", time.Since(indexStarted).Milliseconds(), len(previous.Movies), len(previous.Shows))
 		runtime.status.CatalogAvailable = true
 		runtime.status.LastSuccessful = previous.GeneratedAt
 		runtime.status.LastRefreshResult = "loaded_snapshot"
@@ -303,17 +308,31 @@ func (c *catalogRuntime) runRefresh(reason string, fullRebuild bool, mode string
 		c.mu.RLock()
 		previous := c.snapshot
 		c.mu.RUnlock()
-		mergeMediaFacts(&next, previous)
-		if saveErr := saveCanonicalSnapshot(c.statePath, next); saveErr != nil {
-			err = saveErr
+		// Refresh construction may intentionally reuse unchanged canonical
+		// objects. Detach once at promotion so mergeMediaFacts cannot mutate the
+		// still-active immutable snapshot observed by readers.
+		if detached, cloneErr := cloneCanonicalSnapshot(next); cloneErr != nil {
+			err = cloneErr
 		} else {
-			c.mu.Lock()
-			c.snapshot = next
-			c.client = client
-			c.sources = make(map[string]*xtream.VODSource)
-			c.capabilities = make(map[string]xtream.CapabilityProbe)
-			c.mu.Unlock()
-			metrics.Promoted = true
+			next = detached
+		}
+		if err == nil {
+			mergeMediaFacts(&next, previous)
+			if saveErr := saveCanonicalSnapshot(c.statePath, next); saveErr != nil {
+				err = saveErr
+			} else {
+				indexStarted := time.Now()
+				indexes := buildCatalogIndexes(next)
+				c.mu.Lock()
+				c.snapshot = next
+				c.indexes = indexes
+				c.client = client
+				c.sources = make(map[string]*xtream.VODSource)
+				c.capabilities = make(map[string]xtream.CapabilityProbe)
+				c.mu.Unlock()
+				log.Printf("catalog read indexes built reason=%q duration_ms=%d movies=%d shows=%d", "promotion", time.Since(indexStarted).Milliseconds(), len(next.Movies), len(next.Shows))
+				metrics.Promoted = true
+			}
 		}
 		c.persistMu.Unlock()
 	}
@@ -399,10 +418,22 @@ func (c *catalogRuntime) clientForConfig(config appConfig) (*xtream.Client, erro
 func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	data, _ := json.Marshal(c.snapshot)
+	// Published snapshots are immutable. Promotions and MediaFacts updates use
+	// replacement rather than in-place mutation, so a shallow value copy is a
+	// safe, constant-time read view.
+	return c.snapshot
+}
+
+func cloneCanonicalSnapshot(snapshot canonicalSnapshot) (canonicalSnapshot, error) {
+	data, err := json.Marshal(snapshot)
+	if err != nil {
+		return canonicalSnapshot{}, fmt.Errorf("clone catalog snapshot: %w", err)
+	}
 	var result canonicalSnapshot
-	_ = json.Unmarshal(data, &result)
-	return result
+	if err := json.Unmarshal(data, &result); err != nil {
+		return canonicalSnapshot{}, fmt.Errorf("clone catalog snapshot: %w", err)
+	}
+	return result, nil
 }
 
 type catalogStatusResponse struct {
@@ -1342,76 +1373,47 @@ func subtitleStreamObjectID(kind, sourceID string, index int) int64 {
 }
 
 func (c *catalogRuntime) playable(ratingKey string) (catalogPlayable, bool) {
-	snapshot := c.snapshotCopy()
-	for index := range snapshot.Movies {
-		item := &snapshot.Movies[index]
-		if movieObjectID(*item) == ratingKey {
-			return catalogPlayable{Kind: "movie", RatingKey: ratingKey, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: item}, true
-		}
+	c.ensureCatalogIndexes()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	locator, ok := c.indexes.byRatingKey[ratingKey]
+	if !ok || (locator.kind != catalogMovie && locator.kind != catalogEpisode) {
+		return catalogPlayable{}, false
 	}
-	for showIndex := range snapshot.Shows {
-		show := &snapshot.Shows[showIndex]
-		for seasonIndex := range show.Seasons {
-			season := &show.Seasons[seasonIndex]
-			for episodeIndex := range season.Episodes {
-				episode := &season.Episodes[episodeIndex]
-				if episodeObjectID(*episode) == ratingKey {
-					return catalogPlayable{Kind: "episode", RatingKey: ratingKey, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
-				}
-			}
-		}
-	}
-	return catalogPlayable{}, false
+	return playableAt(c.snapshot, locator), true
 }
 
 func (c *catalogRuntime) metadataKind(ratingKey string) (string, bool) {
 	if ratingKey == "" {
 		return "", false
 	}
-	snapshot := c.snapshotCopy()
-	for _, movie := range snapshot.Movies {
-		if movieObjectID(movie) == ratingKey {
-			return "movie", true
-		}
+	locator, _, _, _, _, ok := c.metadataAt(ratingKey)
+	if !ok {
+		return "", false
 	}
-	for _, show := range snapshot.Shows {
-		if showObjectID(show) == ratingKey {
-			return "show", true
-		}
-		for _, season := range show.Seasons {
-			if seasonObjectID(show, season) == ratingKey {
-				return "season", true
-			}
-			for _, episode := range season.Episodes {
-				if episodeObjectID(episode) == ratingKey {
-					return "episode", true
-				}
-			}
-		}
+	switch locator.kind {
+	case catalogMovie:
+		return "movie", true
+	case catalogShow:
+		return "show", true
+	case catalogSeason:
+		return "season", true
+	case catalogEpisode:
+		return "episode", true
+	default:
+		return "", false
 	}
-	return "", false
 }
 
 func (c *catalogRuntime) firstPlayableEpisode(showRatingKey string) (catalogPlayable, bool) {
-	snapshot := c.snapshotCopy()
-	for showIndex := range snapshot.Shows {
-		show := &snapshot.Shows[showIndex]
-		if showObjectID(*show) != showRatingKey {
-			continue
-		}
-		for seasonIndex := range show.Seasons {
-			season := &show.Seasons[seasonIndex]
-			for episodeIndex := range season.Episodes {
-				episode := &season.Episodes[episodeIndex]
-				if strings.TrimSpace(episode.SourceID) == "" || strings.TrimSpace(episode.Extension) == "" {
-					continue
-				}
-				return catalogPlayable{Kind: "episode", RatingKey: episodeObjectID(*episode), SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
-			}
-		}
+	c.ensureCatalogIndexes()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	locator, ok := c.indexes.firstEpisode[showRatingKey]
+	if !ok {
 		return catalogPlayable{}, false
 	}
-	return catalogPlayable{}, false
+	return playableAt(c.snapshot, locator), true
 }
 
 func (c *catalogRuntime) source(item catalogPlayable) (*xtream.VODSource, error) {
@@ -1538,6 +1540,24 @@ func (c *catalogRuntime) inspectMedia(ctx context.Context, item catalogPlayable,
 	return facts, probeErr
 }
 
+func (c *catalogRuntime) scheduleMediaInspection(item catalogPlayable, knownSize int64) {
+	if item.MediaFacts.State == "inspected" {
+		return
+	}
+	key := item.Kind + ":" + item.SourceID
+	if _, loaded := c.backgroundInspections.LoadOrStore(key, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer c.backgroundInspections.Delete(key)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if _, err := c.inspectMedia(ctx, item, knownSize); err != nil {
+			log.Printf("background media inspection failed kind=%q source_id=%q", item.Kind, item.SourceID)
+		}
+	}()
+}
+
 func mediaResponseSize(resp *http.Response) int64 {
 	if resp.StatusCode == http.StatusOK && resp.ContentLength > 0 {
 		return resp.ContentLength
@@ -1553,33 +1573,41 @@ func mediaResponseSize(resp *http.Response) int64 {
 func (c *catalogRuntime) storeMediaFacts(item catalogPlayable, facts canonical.MediaFacts) {
 	c.persistMu.Lock()
 	defer c.persistMu.Unlock()
-	c.mu.Lock()
-	for index := range c.snapshot.Movies {
-		if c.snapshot.Movies[index].SourceID == item.SourceID && item.Kind == "movie" {
-			c.snapshot.Movies[index].MediaFacts = facts
-		}
-	}
-	for showIndex := range c.snapshot.Shows {
-		for seasonIndex := range c.snapshot.Shows[showIndex].Seasons {
-			for episodeIndex := range c.snapshot.Shows[showIndex].Seasons[seasonIndex].Episodes {
-				episode := &c.snapshot.Shows[showIndex].Seasons[seasonIndex].Episodes[episodeIndex]
-				if episode.SourceID == item.SourceID && item.Kind == "episode" {
-					episode.MediaFacts = facts
-				}
-			}
-		}
-	}
-	data, _ := json.Marshal(c.snapshot)
+	c.ensureCatalogIndexes()
+	c.mu.RLock()
+	next := c.snapshot
+	indexes := c.indexes
 	statePath := c.statePath
-	c.mu.Unlock()
+	var locator catalogLocator
+	var ok bool
+	if item.Kind == "movie" {
+		locator, ok = indexes.movieBySourceID[item.SourceID]
+	} else {
+		locator, ok = indexes.episodeBySourceID[item.SourceID]
+	}
+	if ok && locator.kind == catalogMovie {
+		next.Movies = append([]canonicalMovie(nil), c.snapshot.Movies...)
+		next.Movies[locator.movie].MediaFacts = facts
+	} else if ok && locator.kind == catalogEpisode {
+		next.Shows = append([]canonicalShow(nil), c.snapshot.Shows...)
+		show := cloneShowForUpdate(c.snapshot.Shows[locator.show])
+		show.Seasons[locator.season].Episodes[locator.episode].MediaFacts = facts
+		next.Shows[locator.show] = show
+	}
+	c.mu.RUnlock()
+	if !ok {
+		return
+	}
 	if statePath != "" {
-		var snapshot canonicalSnapshot
-		if json.Unmarshal(data, &snapshot) == nil {
-			if err := saveCanonicalSnapshot(statePath, snapshot); err != nil {
-				log.Printf("media facts persist failed source_id=%q", item.SourceID)
-			}
+		if err := saveCanonicalSnapshot(statePath, next); err != nil {
+			log.Printf("media facts persist failed source_id=%q", item.SourceID)
+			return
 		}
 	}
+	c.mu.Lock()
+	c.snapshot = next
+	c.indexes = indexes
+	c.mu.Unlock()
 }
 
 func parsePositiveInt(value string) int {

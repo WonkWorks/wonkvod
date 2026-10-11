@@ -277,6 +277,7 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 	emptyShow := canonicalShow{SourceID: "empty-show", Title: "Empty Show", Seasons: []canonicalSeason{{Number: 1}}}
 	handler.catalog.mu.Lock()
 	handler.catalog.snapshot.Shows = append(handler.catalog.snapshot.Shows, emptyShow)
+	handler.catalog.indexes = nil
 	handler.catalog.mu.Unlock()
 	emptyTarget := "/playQueues?type=video&uri=" + url.QueryEscape("server://fixture/com.plexapp.plugins.library/library/metadata/"+showObjectID(emptyShow))
 	emptyResponse := performRealRequest(handler, http.MethodPost, emptyTarget, "application/json", nil)
@@ -417,11 +418,59 @@ func TestTruthfulMediaFactsProjectionPreservesVirtualIDs(t *testing.T) {
 	}
 }
 
+func TestUninspectedMetadataReturnsBeforeBackgroundProbe(t *testing.T) {
+	probeStarted := make(chan struct{}, 1)
+	releaseProbe := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "/movie/user/pass/movie-slow.mkv") {
+			select {
+			case probeStarted <- struct{}{}:
+			default:
+			}
+			<-releaseProbe
+			w.Header().Set("Content-Range", "bytes 0-35/36")
+			w.WriteHeader(http.StatusPartialContent)
+			_, _ = w.Write([]byte("0123456789abcdefghijklmnopqrstuvwxyz"))
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(func() {
+		close(releaseProbe)
+		upstream.Close()
+	})
+	client, err := xtream.NewClient(upstream.Client(), upstream.URL, "user", "pass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := canonicalSnapshot{Version: realCatalogVersion, Movies: []canonicalMovie{{SourceID: "movie-slow", Title: "Slow Probe", Extension: "mkv", Details: canonical.MovieDetails{ID: "movie-slow", Title: "Slow Probe", Extension: "mkv"}}}}
+	runtime := &catalogRuntime{client: client, snapshot: snapshot, indexes: buildCatalogIndexes(snapshot), sources: map[string]*xtream.VODSource{}, capabilities: map[string]xtream.CapabilityProbe{}}
+	handler := &realCatalogHandler{catalog: runtime, passthrough: http.NotFoundHandler(), httpClient: upstream.Client(), queues: map[int64]virtualPlayQueue{}}
+	responseReady := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		responseReady <- performRealRequest(handler, http.MethodGet, "/library/metadata/"+movieObjectID(snapshot.Movies[0])+"?checkFiles=1&includeExtras=1", "application/json", nil)
+	}()
+	select {
+	case response := <-responseReady:
+		if response.Code != http.StatusOK {
+			t.Fatalf("metadata status=%d body=%s", response.Code, response.Body.String())
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("metadata response waited for lazy media inspection")
+	}
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("metadata response did not schedule background media inspection")
+	}
+}
+
 func TestRokuDecisionDoesNotClaimDirectPlayForMultichannelAAC(t *testing.T) {
 	handler, snapshot, _ := realCatalogTestHandler(t)
 	snapshot.Movies[0].MediaFacts.Audio[0].Channels = 6
 	handler.catalog.mu.Lock()
 	handler.catalog.snapshot = *snapshot
+	handler.catalog.indexes = nil
 	handler.catalog.mu.Unlock()
 	movieID := movieObjectID(snapshot.Movies[0])
 	request := httptest.NewRequest(http.MethodGet, "/video/:/transcode/universal/decision?path="+url.QueryEscape("/library/metadata/"+movieID), nil)
@@ -498,6 +547,7 @@ func TestRokuDecisionEvaluatesSelectedAudioStream(t *testing.T) {
 			snapshot.Movies[0].MediaFacts.Audio = test.audio
 			handler.catalog.mu.Lock()
 			handler.catalog.snapshot = *snapshot
+			handler.catalog.indexes = nil
 			handler.catalog.mu.Unlock()
 
 			movieID := movieObjectID(snapshot.Movies[0])
@@ -544,6 +594,7 @@ func TestRokuDecisionRejectsAmbiguousOrUnknownAudioSelection(t *testing.T) {
 	}
 	handler.catalog.mu.Lock()
 	handler.catalog.snapshot = *snapshot
+	handler.catalog.indexes = nil
 	handler.catalog.mu.Unlock()
 	movieID := movieObjectID(snapshot.Movies[0])
 	base := "/video/:/transcode/universal/decision?path=" + url.QueryEscape("/library/metadata/"+movieID)

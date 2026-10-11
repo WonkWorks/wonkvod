@@ -443,6 +443,9 @@ func TestCatalogRefreshSerializationAndFallback(t *testing.T) {
 	if status := runtime.catalogStatus(); status.RefreshRunning || status.Progress.Phase != "complete" || status.Movies != 2 {
 		t.Fatalf("successful refresh did not transition/update counts: %#v", status)
 	}
+	if _, ok := runtime.playable(movieObjectID(runtime.snapshotCopy().Movies[1])); !ok {
+		t.Fatal("successful refresh did not publish matching read indexes")
+	}
 	if persisted, err := loadCanonicalSnapshot(runtime.statePath); err != nil || len(persisted.Movies) != 2 {
 		t.Fatalf("promoted snapshot was not persisted atomically: movies=%d err=%v", len(persisted.Movies), err)
 	}

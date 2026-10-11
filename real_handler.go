@@ -56,6 +56,8 @@ func newRealCatalogHandler(upstream string) (http.Handler, error) {
 }
 
 func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r, profile := startCatalogRequestProfile(r)
+	defer profile.finish()
 	if r.Method == http.MethodOptions {
 		addCommonHeaders(w)
 		w.WriteHeader(http.StatusNoContent)
@@ -96,11 +98,11 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case requestPath == "/hubs" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeHomeHubs(w, r)
 	case requestPath == "/hubs/promoted" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.writePromotedHubs(w)
+		h.writePromotedHubs(w, r)
 	case requestPath == "/hubs/sections/1" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.writeSectionHubs(w, 1)
+		h.writeSectionHubs(w, r, 1)
 	case requestPath == "/hubs/sections/2" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.writeSectionHubs(w, 2)
+		h.writeSectionHubs(w, r, 2)
 	case strings.HasPrefix(requestPath, "/library/metadata/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		if h.serveMetadata(w, r) {
 			return
@@ -212,18 +214,6 @@ func (h *realCatalogHandler) writeSection(w http.ResponseWriter, section int) {
 	writeTVLibrarySection(w)
 }
 
-func containerWindow(r *http.Request, total int) (int, int) {
-	start, _ := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Start"))
-	if start < 0 || start > total {
-		start = 0
-	}
-	size := total - start
-	if requested, err := strconv.Atoi(r.URL.Query().Get("X-Plex-Container-Size")); err == nil && requested >= 0 && requested < size {
-		size = requested
-	}
-	return start, start + size
-}
-
 func reverseRequested(r *http.Request) bool {
 	return strings.Contains(strings.ToLower(r.URL.Query().Get("sort")), ":desc")
 }
@@ -236,63 +226,41 @@ func itemTimestamp(revision string) int64 {
 	return libraryUpdatedAt
 }
 
-func reverseMovies(items []canonicalMovie) {
-	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
-		items[left], items[right] = items[right], items[left]
-	}
-}
-
-func reverseShows(items []canonicalShow) {
-	for left, right := 0, len(items)-1; left < right; left, right = left+1, right-1 {
-		items[left], items[right] = items[right], items[left]
-	}
-}
-
 func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Request) {
-	snapshot := h.catalog.snapshotCopy()
-	items := append([]canonicalMovie(nil), snapshot.Movies...)
-	items = filterMoviesByGenre(items, r.URL.Query().Get("genre"))
-	if reverseRequested(r) {
-		reverseMovies(items)
-	}
-	start, end := containerWindow(r, len(items))
-	metadata := make([]movie, 0, end-start)
-	for _, item := range items[start:end] {
+	items, _ := h.catalog.movieWindow(r.URL.Query().Get("genre"), reverseRequested(r), r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+	catalogProfileMark(r, "indexed_selection")
+	metadata := make([]movie, 0, len(items))
+	for _, item := range items {
 		metadata = append(metadata, h.movieModel(item, false, false, 0))
 	}
+	catalogProfileMark(r, "metadata_assembly")
 	container := mediaContainer{Size: len(metadata), AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Art: "/:/resources/movie-fanart.jpg", Thumb: "/:/resources/movie.png", Title1: libraryName, Title2: "All " + libraryName, ViewGroup: "movie", ViewMode: 65592, Metadata: metadata}
 	writeNegotiatedMediaContainer(w, r, container)
+	catalogProfileMark(r, "serialization")
 }
 
 func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request) {
-	snapshot := h.catalog.snapshotCopy()
 	genre := r.URL.Query().Get("genre")
 	if genre == "" && r.URL.Query().Get("type") == "4" {
-		var episodes []tvItem
-		for _, show := range snapshot.Shows {
-			for _, season := range show.Seasons {
-				for _, episode := range season.Episodes {
-					episodes = append(episodes, h.episodeModel(show, season, episode, false, false, false, 0))
-				}
-			}
+		playables, _ := h.catalog.episodeWindow(r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+		catalogProfileMark(r, "indexed_selection")
+		episodes := make([]tvItem, 0, len(playables))
+		for _, item := range playables {
+			episodes = append(episodes, h.episodeModel(*item.Show, *item.Season, *item.Episode, false, false, false, 0))
 		}
-		start, end := containerWindow(r, len(episodes))
-		container := h.realTVContainer(episodes[start:end])
+		container := h.realTVContainer(episodes)
 		container.Title1 = tvLibraryName
 		container.Title2 = "All Episodes"
 		container.ViewGroup = "episode"
 		container.ViewMode = 65592
 		writeNegotiatedTVContainer(w, r, container)
+		catalogProfileMark(r, "serialization")
 		return
 	}
-	items := append([]canonicalShow(nil), snapshot.Shows...)
-	items = filterShowsByGenre(items, genre)
-	if reverseRequested(r) {
-		reverseShows(items)
-	}
-	start, end := containerWindow(r, len(items))
-	metadata := make([]tvItem, 0, end-start)
-	for _, item := range items[start:end] {
+	items, _ := h.catalog.showWindow(genre, reverseRequested(r), r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+	catalogProfileMark(r, "indexed_selection")
+	metadata := make([]tvItem, 0, len(items))
+	for _, item := range items {
 		metadata = append(metadata, h.showModel(item, false))
 	}
 	container := h.realTVContainer(metadata)
@@ -304,6 +272,7 @@ func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request)
 	container.ViewMode = 65592
 	container.Nocache = truePointer()
 	writeNegotiatedTVContainer(w, r, container)
+	catalogProfileMark(r, "serialization")
 }
 
 func (h *realCatalogHandler) realTVContainer(metadata []tvItem) tvMediaContainer {
@@ -317,99 +286,97 @@ func (h *realCatalogHandler) serveMetadata(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	key := parts[0]
-	snapshot := h.catalog.snapshotCopy()
-	for _, item := range snapshot.Movies {
-		if movieObjectID(item) == key {
-			if len(parts) > 1 {
-				if parts[1] == "thumb" {
-					return h.proxyImage(w, r, item.Details.Poster)
-				}
-				if parts[1] == "art" {
-					return h.proxyImage(w, r, item.Details.Fanart)
-				}
-				if parts[1] == "related" || parts[1] == "userState" {
-					writeEmptyContainer(w)
-					return true
-				}
-				return false
-			}
-			playable := catalogPlayable{Kind: "movie", RatingKey: key, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: &item}
-			size, available := h.detailCapability(r, playable)
-			item.MediaFacts = h.lazyMediaFacts(r.Context(), playable, int64(size))
-			container := mediaContainer{Size: 1, AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Metadata: []movie{h.movieModel(item, true, available, size)}}
-			writeNegotiatedMediaContainer(w, r, container)
-			return true
-		}
+	locator, item, show, season, episode, found := h.catalog.metadataAt(key)
+	catalogProfileMark(r, "rating_key_lookup")
+	if !found {
+		return false
 	}
-	for _, show := range snapshot.Shows {
-		showKey := showObjectID(show)
-		if showKey == key {
-			if len(parts) > 1 {
-				if parts[1] == "children" {
-					h.writeSeasons(w, r, show)
-					return true
-				}
-				if parts[1] == "thumb" {
-					return h.proxyImage(w, r, show.Details.Poster)
-				}
-				if parts[1] == "art" {
-					return h.proxyImage(w, r, show.Details.Fanart)
-				}
-				if parts[1] == "related" || parts[1] == "userState" {
-					writeEmptyContainer(w)
-					return true
-				}
-				return false
+	switch locator.kind {
+	case catalogMovie:
+		if len(parts) > 1 {
+			if parts[1] == "thumb" {
+				return h.proxyImage(w, r, item.Details.Poster)
 			}
-			container := h.realTVContainer([]tvItem{h.showModel(show, true)})
-			writeNegotiatedTVContainer(w, r, container)
-			return true
-		}
-		for _, season := range show.Seasons {
-			seasonKey := seasonObjectID(show, season)
-			if seasonKey == key {
-				if len(parts) > 1 {
-					if parts[1] == "children" {
-						h.writeEpisodes(w, r, show, season)
-						return true
-					}
-					if parts[1] == "thumb" {
-						return h.proxyImage(w, r, firstNonEmptyString(season.Poster, show.Details.Poster))
-					}
-					if parts[1] == "art" {
-						return h.proxyImage(w, r, show.Details.Fanart)
-					}
-					if parts[1] == "related" || parts[1] == "userState" {
-						writeEmptyContainer(w)
-						return true
-					}
-					return false
-				}
-				container := h.realTVContainer([]tvItem{h.seasonModel(show, season, true)})
-				writeNegotiatedTVContainer(w, r, container)
+			if parts[1] == "art" {
+				return h.proxyImage(w, r, item.Details.Fanart)
+			}
+			if parts[1] == "related" || parts[1] == "userState" {
+				writeEmptyContainer(w)
 				return true
 			}
-			for _, episode := range season.Episodes {
-				if episodeObjectID(episode) == key {
-					if len(parts) > 1 {
-						if parts[1] == "thumb" || parts[1] == "art" {
-							return h.proxyImage(w, r, firstNonEmptyString(episode.Details.Artwork, show.Details.Fanart, show.Details.Poster))
-						}
-						if parts[1] == "related" || parts[1] == "userState" {
-							writeEmptyContainer(w)
-							return true
-						}
-						return false
-					}
-					playable := catalogPlayable{Kind: "episode", RatingKey: key, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: &show, Season: &season, Episode: &episode}
-					size, available := h.detailCapability(r, playable)
-					episode.MediaFacts = h.lazyMediaFacts(r.Context(), playable, int64(size))
-					container := h.realTVContainer([]tvItem{h.episodeModel(show, season, episode, true, r.URL.Query().Get("includeExtras") == "1", available, size)})
-					writeNegotiatedTVContainer(w, r, container)
-					return true
-				}
-			}
+			return false
 		}
+		playable := catalogPlayable{Kind: "movie", RatingKey: key, SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: &item}
+		size, available := h.detailCapability(r, playable)
+		h.catalog.scheduleMediaInspection(playable, int64(size))
+		catalogProfileMark(r, "availability_and_inspection_schedule")
+		container := mediaContainer{Size: 1, AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Metadata: []movie{h.movieModel(item, true, available, size)}}
+		writeNegotiatedMediaContainer(w, r, container)
+		catalogProfileMark(r, "serialization")
+		return true
+	case catalogShow:
+		if len(parts) > 1 {
+			if parts[1] == "children" {
+				h.writeSeasons(w, r, show)
+				return true
+			}
+			if parts[1] == "thumb" {
+				return h.proxyImage(w, r, show.Details.Poster)
+			}
+			if parts[1] == "art" {
+				return h.proxyImage(w, r, show.Details.Fanart)
+			}
+			if parts[1] == "related" || parts[1] == "userState" {
+				writeEmptyContainer(w)
+				return true
+			}
+			return false
+		}
+		container := h.realTVContainer([]tvItem{h.showModel(show, true)})
+		writeNegotiatedTVContainer(w, r, container)
+		catalogProfileMark(r, "serialization")
+		return true
+	case catalogSeason:
+		if len(parts) > 1 {
+			if parts[1] == "children" {
+				h.writeEpisodes(w, r, show, season)
+				return true
+			}
+			if parts[1] == "thumb" {
+				return h.proxyImage(w, r, firstNonEmptyString(season.Poster, show.Details.Poster))
+			}
+			if parts[1] == "art" {
+				return h.proxyImage(w, r, show.Details.Fanart)
+			}
+			if parts[1] == "related" || parts[1] == "userState" {
+				writeEmptyContainer(w)
+				return true
+			}
+			return false
+		}
+		container := h.realTVContainer([]tvItem{h.seasonModel(show, season, true)})
+		writeNegotiatedTVContainer(w, r, container)
+		catalogProfileMark(r, "serialization")
+		return true
+	case catalogEpisode:
+		if len(parts) > 1 {
+			if parts[1] == "thumb" || parts[1] == "art" {
+				return h.proxyImage(w, r, firstNonEmptyString(episode.Details.Artwork, show.Details.Fanart, show.Details.Poster))
+			}
+			if parts[1] == "related" || parts[1] == "userState" {
+				writeEmptyContainer(w)
+				return true
+			}
+			return false
+		}
+		playable := catalogPlayable{Kind: "episode", RatingKey: key, SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: &show, Season: &season, Episode: &episode}
+		size, available := h.detailCapability(r, playable)
+		h.catalog.scheduleMediaInspection(playable, int64(size))
+		catalogProfileMark(r, "availability_and_inspection_schedule")
+		container := h.realTVContainer([]tvItem{h.episodeModel(show, season, episode, true, r.URL.Query().Get("includeExtras") == "1", available, size)})
+		writeNegotiatedTVContainer(w, r, container)
+		catalogProfileMark(r, "serialization")
+		return true
 	}
 	return false
 }
@@ -418,16 +385,17 @@ func (h *realCatalogHandler) detailCapability(r *http.Request, item catalogPlaya
 	if r.URL.Query().Get("checkFiles") != "1" {
 		return 0, false
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
-	defer cancel()
-	capability, err := h.catalog.capability(ctx, item)
-	if err != nil {
-		return 0, false
+	size := item.MediaFacts.Size
+	h.catalog.mu.RLock()
+	capability, cached := h.catalog.capabilities[item.Kind+":"+item.SourceID]
+	h.catalog.mu.RUnlock()
+	if cached {
+		size = capability.Size
 	}
-	if capability.Size > math.MaxInt {
+	if size > math.MaxInt {
 		return 0, true
 	}
-	return int(capability.Size), true
+	return int(size), true
 }
 
 func (h *realCatalogHandler) lazyMediaFacts(parent context.Context, item catalogPlayable, size int64) canonical.MediaFacts {
@@ -744,26 +712,7 @@ func slugify(title, year string) string {
 }
 
 func (h *realCatalogHandler) playableByPartID(id int64) (catalogPlayable, bool) {
-	snapshot := h.catalog.snapshotCopy()
-	for i := range snapshot.Movies {
-		item := &snapshot.Movies[i]
-		if partObjectID("movie", item.SourceID) == id {
-			return catalogPlayable{Kind: "movie", RatingKey: movieObjectID(*item), SourceID: item.SourceID, Extension: item.Extension, Title: item.Title, Duration: int(item.Details.DurationMillis), Bitrate: item.Details.Bitrate, MediaFacts: item.MediaFacts, Movie: item}, true
-		}
-	}
-	for si := range snapshot.Shows {
-		show := &snapshot.Shows[si]
-		for sj := range show.Seasons {
-			season := &show.Seasons[sj]
-			for ei := range season.Episodes {
-				episode := &season.Episodes[ei]
-				if partObjectID("episode", episode.SourceID) == id {
-					return catalogPlayable{Kind: "episode", RatingKey: episodeObjectID(*episode), SourceID: episode.SourceID, Extension: episode.Extension, Title: episode.Details.Title, Duration: int(episode.Details.DurationMillis), Bitrate: episode.Details.Bitrate, MediaFacts: episode.MediaFacts, Show: show, Season: season, Episode: episode}, true
-				}
-			}
-		}
-	}
-	return catalogPlayable{}, false
+	return h.catalog.playableByPart(id)
 }
 
 func (h *realCatalogHandler) servePart(w http.ResponseWriter, r *http.Request) bool {
@@ -936,33 +885,25 @@ func (h *realCatalogHandler) artworkURL(metadataPath string) (string, bool) {
 		return "", false
 	}
 	key, kind := parts[0], parts[1]
-	snapshot := h.catalog.snapshotCopy()
-	for _, movie := range snapshot.Movies {
-		if movieObjectID(movie) == key {
-			if kind == "thumb" {
-				return movie.Details.Poster, movie.Details.Poster != ""
-			}
-			return movie.Details.Fanart, movie.Details.Fanart != ""
-		}
+	locator, movie, show, season, episode, ok := h.catalog.metadataAt(key)
+	if !ok {
+		return "", false
 	}
-	for _, show := range snapshot.Shows {
-		showKey := showObjectID(show)
-		if showKey == key {
-			if kind == "thumb" {
-				return show.Details.Poster, show.Details.Poster != ""
-			}
-			return show.Details.Fanart, show.Details.Fanart != ""
+	switch locator.kind {
+	case catalogMovie:
+		if kind == "thumb" {
+			return movie.Details.Poster, movie.Details.Poster != ""
 		}
-		for _, season := range show.Seasons {
-			if seasonObjectID(show, season) == key {
-				return firstNonEmptyString(season.Poster, show.Details.Poster), true
-			}
-			for _, episode := range season.Episodes {
-				if episodeObjectID(episode) == key {
-					return firstNonEmptyString(episode.Details.Artwork, show.Details.Fanart, show.Details.Poster), true
-				}
-			}
+		return movie.Details.Fanart, movie.Details.Fanart != ""
+	case catalogShow:
+		if kind == "thumb" {
+			return show.Details.Poster, show.Details.Poster != ""
 		}
+		return show.Details.Fanart, show.Details.Fanart != ""
+	case catalogSeason:
+		return firstNonEmptyString(season.Poster, show.Details.Poster), true
+	case catalogEpisode:
+		return firstNonEmptyString(episode.Details.Artwork, show.Details.Fanart, show.Details.Poster), true
 	}
 	return "", false
 }
@@ -972,10 +913,13 @@ func (h *realCatalogHandler) servePhoto(w http.ResponseWriter, r *http.Request) 
 		source = decoded
 	}
 	target, ok := h.artworkURL(source)
+	catalogProfileMark(r, "artwork_lookup")
 	if !ok {
 		return false
 	}
-	return h.proxyImage(w, r, target)
+	result := h.proxyImage(w, r, target)
+	catalogProfileMark(r, "artwork_upstream")
+	return result
 }
 func (h *realCatalogHandler) proxyImage(w http.ResponseWriter, r *http.Request, target string) bool {
 	target = strings.TrimSpace(target)
@@ -1050,6 +994,7 @@ func (h *realCatalogHandler) createPlayQueue(w http.ResponseWriter, r *http.Requ
 	if !selected {
 		return false
 	}
+	catalogProfileMark(r, "indexed_selection")
 	if contextKey == "" {
 		contextKey = item.RatingKey
 	}
@@ -1058,6 +1003,7 @@ func (h *realCatalogHandler) createPlayQueue(w http.ResponseWriter, r *http.Requ
 	h.queues[id] = virtualPlayQueue{SelectedKey: item.RatingKey, ContextKey: contextKey}
 	h.queuesMu.Unlock()
 	h.writePlayQueue(w, r, id, item, contextKey)
+	catalogProfileMark(r, "serialization")
 	return true
 }
 func (h *realCatalogHandler) readPlayQueue(w http.ResponseWriter, r *http.Request) bool {
@@ -1073,10 +1019,12 @@ func (h *realCatalogHandler) readPlayQueue(w http.ResponseWriter, r *http.Reques
 		return false
 	}
 	item, ok := h.catalog.playable(queue.SelectedKey)
+	catalogProfileMark(r, "indexed_selection")
 	if !ok {
 		return false
 	}
 	h.writePlayQueue(w, r, id, item, queue.ContextKey)
+	catalogProfileMark(r, "serialization")
 	return true
 }
 func (h *realCatalogHandler) queueMovie(item catalogPlayable) movie {
@@ -1218,23 +1166,17 @@ func (h *realCatalogHandler) writeEmptyNavigation(w http.ResponseWriter, section
 }
 
 func (h *realCatalogHandler) movieHubItems(limit int) []any {
-	snapshot := h.catalog.snapshotCopy()
-	if len(snapshot.Movies) < limit {
-		limit = len(snapshot.Movies)
-	}
-	items := make([]any, 0, limit)
-	for _, movie := range snapshot.Movies[:limit] {
+	movies := h.catalog.hubMovies(limit)
+	items := make([]any, 0, len(movies))
+	for _, movie := range movies {
 		items = append(items, h.movieModel(movie, false, false, 0))
 	}
 	return items
 }
 func (h *realCatalogHandler) showHubItems(limit int) []any {
-	snapshot := h.catalog.snapshotCopy()
-	if len(snapshot.Shows) < limit {
-		limit = len(snapshot.Shows)
-	}
-	items := make([]any, 0, limit)
-	for _, show := range snapshot.Shows[:limit] {
+	shows := h.catalog.hubShows(limit)
+	items := make([]any, 0, len(shows))
+	for _, show := range shows {
 		items = append(items, h.showModel(show, true))
 	}
 	return items
@@ -1282,13 +1224,17 @@ func (h *realCatalogHandler) writeHomeHubs(w http.ResponseWriter, r *http.Reques
 	if all || requested["home.television.recent"] {
 		hubs = append(hubs, h.realTVHub(true))
 	}
+	catalogProfileMark(r, "indexed_hub_assembly")
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs}})
+	catalogProfileMark(r, "serialization")
 }
-func (h *realCatalogHandler) writePromotedHubs(w http.ResponseWriter) {
+func (h *realCatalogHandler) writePromotedHubs(w http.ResponseWriter, r *http.Request) {
 	hubs := []any{homeContinueHub(), homeOnDeckHub(), h.realMovieHub(false), h.realTVHub(false)}
+	catalogProfileMark(r, "indexed_hub_assembly")
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs}})
+	catalogProfileMark(r, "serialization")
 }
-func (h *realCatalogHandler) writeSectionHubs(w http.ResponseWriter, section int) {
+func (h *realCatalogHandler) writeSectionHubs(w http.ResponseWriter, r *http.Request, section int) {
 	var hubs []any
 	name, uuid := libraryName, libraryUUID
 	if section == 1 {
@@ -1297,5 +1243,7 @@ func (h *realCatalogHandler) writeSectionHubs(w http.ResponseWriter, section int
 		name, uuid = tvLibraryName, tvLibraryUUID
 		hubs = []any{map[string]any{"context": "hub.tv.inprogress", "hubIdentifier": "tv.inprogress.2", "key": "/hubs/sections/2/continueWatching/items", "more": false, "size": 0, "style": "shelf", "title": "Continue Watching", "type": "episode"}, h.realTVHub(false)}
 	}
+	catalogProfileMark(r, "indexed_hub_assembly")
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "librarySectionID": section, "librarySectionTitle": name, "librarySectionUUID": uuid, "Hub": hubs}})
+	catalogProfileMark(r, "serialization")
 }

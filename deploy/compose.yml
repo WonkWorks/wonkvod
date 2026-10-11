@@ -27,6 +27,7 @@ services:
       WONKVOD_CATALOG_STATE: "/var/lib/wonkvod/catalog.json"
       WONKVOD_CONFIG_STATE: "/var/lib/wonkvod/config.json"
       WONKVOD_WEB_ADDR: ":32501"
+      WONKVOD_PROFILE_REQUESTS: "${WONKVOD_PROFILE_REQUESTS:-0}"
       WONKVOD_SECURE_URI: "https://192-0-2-22.fixture.example.invalid:32499"
     volumes:
       - type: bind

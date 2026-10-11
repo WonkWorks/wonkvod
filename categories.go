@@ -201,12 +201,13 @@ func filterShowsByGenre(items []canonicalShow, id string) []canonicalShow {
 }
 
 func (c *catalogRuntime) categoryFacets(section int) []genreFacet {
+	c.ensureCatalogIndexes()
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if section == 2 {
-		return showGenreFacets(c.snapshot.Shows)
+		return append([]genreFacet(nil), c.indexes.showFacets...)
 	}
-	return movieGenreFacets(c.snapshot.Movies)
+	return append([]genreFacet(nil), c.indexes.movieFacets...)
 }
 
 func categoryImageURL(art string) string {
@@ -232,6 +233,7 @@ func categoryDirectories(section int, facets []genreFacet, legacy bool) []catego
 func (h *realCatalogHandler) writeCategories(w http.ResponseWriter, r *http.Request, section int, legacy bool) {
 	name, art, thumb := libraryName, "/:/resources/movie-fanart.jpg", "/:/resources/movie.png"
 	facets := h.catalog.categoryFacets(section)
+	catalogProfileMark(r, "indexed_facets")
 	var nocache *plexBool
 	if section == 2 {
 		name, art, thumb = tvLibraryName, "/:/resources/show-fanart.jpg", "/:/resources/show.png"
@@ -250,7 +252,9 @@ func (h *realCatalogHandler) writeCategories(w http.ResponseWriter, r *http.Requ
 	}
 	if acceptsJSON(r) {
 		writeJSON(w, categoryContainerResponse{MediaContainer: container})
+		catalogProfileMark(r, "serialization")
 		return
 	}
 	writeXML(w, container)
+	catalogProfileMark(r, "serialization")
 }

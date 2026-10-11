@@ -28,6 +28,7 @@ func categoryTestHandler(t *testing.T) (*realCatalogHandler, *canonicalSnapshot)
 		Details: canonical.SeriesDetails{ID: "show-2", Title: "Comedy Fixture", Genres: []string{"Comedy", "Reality"}},
 	})
 	handler.catalog.snapshot = snapshot
+	handler.catalog.indexes = nil
 	handler.catalog.mu.Unlock()
 	return handler, &snapshot
 }
@@ -160,6 +161,7 @@ func TestRealCategoryXMLLegacyGenreAndEmptyLibrary(t *testing.T) {
 
 	handler.catalog.mu.Lock()
 	handler.catalog.snapshot.Movies = nil
+	handler.catalog.indexes = nil
 	handler.catalog.mu.Unlock()
 	empty := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/library/sections/1/categories", "application/json", nil))
 	if empty["size"] != float64(0) {
