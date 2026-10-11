@@ -302,6 +302,49 @@ func TestRealTVPlayQueueSelectsEpisodeFromKey(t *testing.T) {
 	}
 }
 
+func TestRealCatalogSourceIdentity(t *testing.T) {
+	handler, snapshot, _ := realCatalogTestHandler(t)
+	movieID := movieObjectID(snapshot.Movies[0])
+	episodeID := episodeObjectID(snapshot.Shows[0].Seasons[0].Episodes[0])
+
+	for _, test := range []struct {
+		name      string
+		ratingKey string
+	}{
+		{name: "movie", ratingKey: movieID},
+		{name: "episode", ratingKey: episodeID},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metadata := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/library/metadata/"+test.ratingKey, "application/json", nil))
+			if metadata["identifier"] != "com.plexapp.plugins.library" {
+				t.Fatalf("metadata identifier=%#v", metadata["identifier"])
+			}
+
+			queueTarget := "/playQueues?uri=" + url.QueryEscape("server://"+machineID+"/com.plexapp.plugins.library/library/metadata/"+test.ratingKey)
+			queue := decodeContainer(t, performRealRequest(handler, http.MethodPost, queueTarget, "application/json", nil))
+			identifier, ok := queue["identifier"].(string)
+			if !ok || identifier != "com.plexapp.plugins.library" {
+				t.Fatalf("play queue identifier=%#v", queue["identifier"])
+			}
+			item := queue["Metadata"].([]any)[0].(map[string]any)
+			sourceURI := "server://" + machineID + "/" + identifier + item["key"].(string)
+			want := "server://" + machineID + "/com.plexapp.plugins.library/library/metadata/" + test.ratingKey
+			if sourceURI != want {
+				t.Fatalf("source URI=%q want=%q", sourceURI, want)
+			}
+			if strings.Contains(sourceURI, "/undefined/library/metadata/") {
+				t.Fatalf("invalid source URI=%q", sourceURI)
+			}
+
+			queueID := int64(queue["playQueueID"].(float64))
+			storedQueue := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/playQueues/"+strconv.FormatInt(queueID, 10), "application/json", nil))
+			if storedQueue["identifier"] != identifier {
+				t.Fatalf("stored play queue identifier=%#v", storedQueue["identifier"])
+			}
+		})
+	}
+}
+
 func TestFirstPlayableEpisodeSkipsUnplayableEntries(t *testing.T) {
 	handler, _, _ := realCatalogTestHandler(t)
 	show := canonicalShow{SourceID: "ordered-show", Title: "Ordered Show", Seasons: []canonicalSeason{

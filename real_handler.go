@@ -1079,7 +1079,7 @@ func (h *realCatalogHandler) queueMovie(item catalogPlayable) movie {
 func (h *realCatalogHandler) writePlayQueue(w http.ResponseWriter, r *http.Request, id int64, item catalogPlayable, contextKey string) {
 	projected := h.queueMovie(item)
 	projected.PlayQueueItemID = 1
-	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": 1, "playQueueID": id, "playQueueSelectedItemID": 1, "playQueueSelectedItemOffset": 0, "playQueueTotalCount": 1, "playQueueVersion": 1, "playQueueShuffled": false, "playQueueSourceURI": "library://x/item/" + url.QueryEscape("/library/metadata/"+contextKey), "Metadata": []any{projected}}})
+	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": 1, "identifier": "com.plexapp.plugins.library", "playQueueID": id, "playQueueSelectedItemID": 1, "playQueueSelectedItemOffset": 0, "playQueueTotalCount": 1, "playQueueVersion": 1, "playQueueShuffled": false, "playQueueSourceURI": "library://x/item/" + url.QueryEscape("/library/metadata/"+contextKey), "Metadata": []any{projected}}})
 }
 func (h *realCatalogHandler) writeDecision(w http.ResponseWriter, r *http.Request) bool {
 	key := metadataKeyFromURI(r.URL.Query().Get("path"))
