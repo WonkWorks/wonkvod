@@ -2,12 +2,12 @@ name: wonkvod
 
 services:
   wonkvod-backend:
-    image: wonkvod-backend:${WONKVOD_VERSION:-17fc3f4}
+    image: "wonkvod-backend:${WONKVOD_VERSION:?set WONKVOD_VERSION via deploy/deploy.sh}"
     build:
       context: ..
       dockerfile: Dockerfile
       args:
-        VCS_REF: ${WONKVOD_GIT_COMMIT:-17fc3f4337a4113ad416b07a97a75936e078871c}
+        VCS_REF: "${WONKVOD_GIT_COMMIT:?set WONKVOD_GIT_COMMIT via deploy/deploy.sh}"
     container_name: wonkvod-backend
     restart: unless-stopped
     read_only: true
@@ -54,7 +54,7 @@ services:
         max-file: "3"
 
   wonkvod-tls:
-    image: wonkvod-tls:${WONKVOD_VERSION:-17fc3f4}
+    image: "wonkvod-tls:${WONKVOD_TLS_VERSION:-17fc3f4}"
     build:
       context: ..
       dockerfile: deploy/tls/Dockerfile
