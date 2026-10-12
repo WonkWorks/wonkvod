@@ -22,15 +22,18 @@ import (
 )
 
 type realCatalogHandler struct {
-	catalog     *catalogRuntime
-	passthrough http.Handler
-	upstreamURL string
-	httpClient  *http.Client
-	queueID     atomic.Int64
-	mediaID     atomic.Uint64
-	queuesMu    sync.RWMutex
-	queues      map[int64]virtualPlayQueue
-	mediaCtx    sync.Map
+	catalog      *catalogRuntime
+	passthrough  http.Handler
+	upstreamURL  string
+	httpClient   *http.Client
+	setupAuth    *adminAuth
+	setupAuthMu  sync.Mutex
+	setupAuthErr error
+	queueID      atomic.Int64
+	mediaID      atomic.Uint64
+	queuesMu     sync.RWMutex
+	queues       map[int64]virtualPlayQueue
+	mediaCtx     sync.Map
 }
 
 type virtualPlayQueue struct {

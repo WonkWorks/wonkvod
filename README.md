@@ -1,322 +1,417 @@
 # WonkVOD
 
-WonkVOD presents an Xtream-compatible video-on-demand catalog as virtual movie
-and TV libraries to stock Plex clients. It serves the Plex-compatible metadata
-API and streams source media bytes on demand; it does not import files into a
-Plex library or require Plex scanners and analyzers to ingest the provider's
-catalog.
+WonkVOD turns an Xtream-compatible video-on-demand source into virtual Movie
+and TV libraries that stock Plex clients can browse and Direct Play. It builds
+a source-neutral canonical catalog, projects that catalog through a
+Plex-compatible HTTP adapter, and streams source media bytes only when a client
+asks for them.
 
-The catalog core is source-neutral. Xtream is the current source adapter and
-the Plex-compatible HTTP surface is the current client adapter.
+WonkVOD does not ingest local media, run Plex scanners or analyzers, modify a
+Plex database, or mount a synthetic filesystem. `catalog.json` is the current
+persisted canonical catalog.
 
 ```text
-Xtream VOD provider
-        |
-        v
-WonkVOD catalog + Plex adapter <--- Web Setup (trusted LAN)
-        |
-        v
-TLS terminator using the identity PMS certificate
-        |
-        v
-stock Plex clients
-
-Claimed identity PMS sidecar ---> Plex identity, cloud presence, TLS certificate,
-                                  and managed-user library entitlements
+Xtream
+   |
+Source Adapter
+   |
+Canonical WonkVOD Catalog (catalog.json)
+   |
++----------+----------+
+|                     |
+Plex Adapter      Future adapters
+|
+plex-identity / TLS compatibility
+|
+Stock Plex Clients
 ```
 
-## What WonkVOD is not
+## Why It Exists
 
-WonkVOD is not a live-TV tuner or proxy, an xTeVe/Threadfin replacement, a DVR,
-a video transcoder, a local-media importer, or a virtual linear-channel
-generator. It exposes provider VOD as on-demand Plex libraries and relies on
-the playback client being able to Direct Play the source codecs.
+Large remote VOD catalogs do not naturally fit Plex's local-file ingestion
+model. Importing placeholder files, waiting for scans, and maintaining a second
+Plex database creates slow synchronization and fragile state. WonkVOD keeps one
+canonical metadata snapshot, applies cheap incremental provider updates, and
+answers Plex browse and playback requests directly. Production Plex libraries
+do not need to rescan when WonkVOD refreshes.
+
+## What WonkVOD Is Not
+
+WonkVOD is not:
+
+- a live-TV proxy such as Threadfin or xTeVe;
+- a DVR;
+- a transcoder or remuxer;
+- a local-media importer;
+- a Tunarr-style virtual linear channel generator; or
+- a replacement for Plex clients or a production Plex Media Server.
+
+Media is offered for Direct Play. Actual playback depends on the container,
+video, audio, and subtitle support of the selected Plex client.
+
+## Architecture
+
+### WonkVOD backend
+
+The non-root, read-only backend container owns the Web Setup service, canonical
+catalog, Plex-compatible virtual libraries, metadata projection, play queues,
+and byte-range media proxy. Its plain Plex-compatible listener is reachable
+only from the private Compose network.
+
+### Canonical catalog
+
+`catalog.json` is an atomically promoted, source-neutral snapshot. Objects have
+stable identities and may belong to multiple categories. Immutable indexes make
+full-scale browsing inexpensive. Provider credentials and operator choices live
+separately in `config.json`; media bytes are never persisted.
+
+### Plex adapter
+
+The adapter projects the catalog as virtual Movie and TV sections and implements
+the response contracts needed by supported stock Plex clients. Refreshing this
+projection does not trigger production PMS scans or alter a Plex SQLite database.
+
+### plex-identity sidecar
+
+A small, claimed, official PMS supplies the Plex machine identity, cloud
+presence, managed-home library entitlements, and a Plex-managed `plex.direct`
+certificate. Its tiny control libraries do not contain the WonkVOD catalog or
+media. Provisioning this sidecar is currently manual.
+
+### TLS terminator
+
+`wonkvod-tls` reads the sidecar's PKCS#12 certificate and Preferences file
+read-only, decodes key material in memory, reloads renewed certificates, and
+proxies HTTPS port 32499 to the private backend. No extracted private key is
+written to ordinary persistent storage.
+
+### Production Plex independence
+
+The sidecar and WonkVOD are independent of a household's production PMS. They
+have separate identity, state, containers, and libraries. WonkVOD activity must
+not restart or mutate production Plex.
 
 ## Requirements
 
 - A Linux host with Docker Engine and Docker Compose v2.
-- A Plex account capable of claiming a small Plex Media Server identity
-  sidecar.
-- An Xtream-compatible provider with movie and/or series VOD APIs.
-- Network access from WonkVOD to the provider, Plex services, and the LAN Plex
-  clients that will use it.
-- Persistent storage for configuration and catalog snapshots. Media files are
-  not downloaded or cached, so disk use is primarily catalog JSON and normal
-  container logs.
-- Enough CPU and RAM for the catalog size. Metadata refresh work is bounded by
-  the configured provider concurrency; playback streams through the service
-  without a media-spooling layer. There is no claimed universal minimum for
-  every provider or catalog size.
+- A Plex account able to claim the identity sidecar.
+- An Xtream-compatible source that exposes Movie and/or Series VOD APIs.
+- DNS/network access to the source, Plex services, and intended LAN clients.
+- Persistent storage for WonkVOD state and the identity PMS configuration.
+- CPU/RAM appropriate to the selected catalog and refresh concurrency. There is
+  no universal minimum; playback is streamed and no media-size local disk is
+  required.
 
-## Current installation
+## Quick Start
 
-The current deployment assumes the source checkout is `/opt/wonkvod` and
-persistent state is `/opt/wonkvod-runtime/state`. These paths are present in
-[`deploy/compose.yml`](deploy/compose.yml); edit the deployment deliberately if
-using different host paths.
+1. Clone the repository into `/opt/wonkvod`.
+2. Copy `deploy/.env.example` to the ignored `deploy/.env` and fill in only
+   installation-specific values.
+3. Create the runtime state directory and protected provider bootstrap file.
+4. Provision and claim the `plex-identity` sidecar; create its two control
+   libraries and wait for its certificate.
+5. Run `./deploy/deploy.sh deploy`.
+6. Read the one-time Web Setup token from the local backend logs and establish
+   the administrator password at `/setup`.
+7. Configure the provider, select categories, and run a normal refresh.
+8. Grant the two sidecar library entitlements to Plex Home users as needed.
+9. Open WonkVOD from a supported Plex client and test compatible media.
 
-There is not yet a one-command clean installation. In particular, provisioning
-and claiming the identity PMS is still a manual prerequisite.
+## Detailed Installation
 
-1. Install Docker Engine and Docker Compose v2 and place the source at
-   `/opt/wonkvod`.
-2. Create `/opt/wonkvod-runtime/state` for the non-root backend container. The
-   directory holds `config.json` and `catalog.json`.
-3. Create `/opt/wonkvod-runtime/xtream.env` with the bootstrap variables
-   `WONKVOD_XTREAM_URL`, `WONKVOD_XTREAM_USER`, and
-   `WONKVOD_XTREAM_PASS`. Protect this file as a credential file. These values
-   seed `config.json` on first start; later Web Setup changes are persisted in
-   the state directory.
-4. Provision the claimed `plex-identity` sidecar described below. It must be on
-   the external Docker network `plex-identity_default`, have persistent PMS
-   configuration, and have acquired its `plex.direct` certificate before the
-   TLS terminator can become useful.
-5. Ensure the current host-specific endpoint, certificate mounts, and LAN Web
-   Setup bind in `deploy/compose.yml` are appropriate for the installation.
-6. Follow [`deploy/README.md`](deploy/README.md) for the current Compose
-   bootstrap and normal deployment workflow. Normal upgrades use:
+### 1. Install the source and create state
 
-   ```sh
-   ./deploy/deploy.sh deploy
-   ```
+```sh
+sudo git clone <repository-url> /opt/wonkvod
+sudo install -d -m 0750 -o 65532 -g 65532 /opt/wonkvod-runtime/state
+sudo install -m 0600 -o root -g root /dev/null /opt/wonkvod-runtime/xtream.env
+cd /opt/wonkvod
+cp deploy/.env.example deploy/.env
+chmod 0600 deploy/.env
+```
 
-   The script requires a clean worktree, validates Compose, builds a
-   commit-labelled backend image, replaces only `wonkvod-backend`, and waits
-   for health. It intentionally does not recreate the identity PMS or TLS
-   terminator.
-7. Open Web Setup on the trusted LAN. In the current deployment it is
-   `http://HOST:32501/`.
-8. On **Provider**, enter the Xtream server URL, username, and password, then
-   test and save the connection.
-9. On **Categories**, select the Movie and TV source categories and apply the
-   selection.
-10. On **Settings**, choose the refresh interval and catalog refresh
-    concurrency. Select **Refresh Now** and wait for a successful atomic
-    catalog promotion.
-11. Confirm Movies and TV Shows are visible from a Plex client, then test a
-    known Direct Play-compatible item before testing more demanding codecs.
+UID/GID `65532` matches the default backend image. If the deployment is changed
+to another runtime user, give that user ownership of the state directory.
 
-The identity sidecar, claim, certificate, advertised connection, and tiny
-control libraries are current setup debt. They are not yet automatically
-created by the Web Setup UI.
+Put bootstrap provider values in `/opt/wonkvod-runtime/xtream.env`:
 
-## Plex identity architecture
+```text
+WONKVOD_XTREAM_URL=https://provider.example
+WONKVOD_XTREAM_USER=replace-me
+WONKVOD_XTREAM_PASS=replace-me
+```
 
-WonkVOD uses a small, separately managed, claimed Plex Media Server container
-as an identity sidecar. The sidecar supplies the Plex machine identity, cloud
-presence, Plex-managed TLS certificate, and control-plane compatibility that
-stock clients expect. It is not WonkVOD's media catalog.
+This file seeds missing configuration. The Web UI later persists settings to
+`config.json`; neither file belongs in Git.
 
-The current sidecar uses the official `plexinc/pms-docker` image, persistent
-configuration under `/opt/plex-identity/config`, and the Docker network
-`plex-identity_default`. A TLS helper reads the PMS-managed certificate
-material read-only and terminates HTTPS on WonkVOD's Plex endpoint. Extracted
-private-key material is kept out of ordinary persistent storage.
+### 2. Configure deployment variables
 
-Two tiny control libraries currently exist on the sidecar:
+Edit `deploy/.env`. Set the sidecar-issued `plex.direct` hostname and URI, the
+sidecar machine identifier, persistent paths, Docker network, and desired host
+ports. Web Setup defaults to `127.0.0.1:32501`; bind it to a trusted LAN address
+only when direct LAN access is intended.
+
+Validate without changing containers:
+
+```sh
+./deploy/deploy.sh config
+```
+
+### 3. Provision the Plex identity sidecar
+
+Create a separately managed official `plexinc/pms-docker` container with:
+
+- persistent `/config` storage (the reference installation uses
+  `/opt/plex-identity/config`);
+- a stable friendly name such as `WonkVOD`;
+- a short-lived claim token supplied only during claiming;
+- an external Docker network named in `PLEX_IDENTITY_NETWORK`; and
+- `ADVERTISE_IP` set to the WonkVOD endpoint, for example
+  `http://LAN-IP:32499/`.
+
+Wait until PMS is claimed, its machine identifier is stable, and
+`Cache/cert-v2.p12` exists. Use supported Plex library APIs to create one tiny
+Movie control library named `WonkVOD Movies` and one tiny TV control library
+named `WonkVOD TV Shows`. Each may contain a harmless local control fixture.
+These sections establish Plex library entitlements; WonkVOD serves the actual
+virtual catalog. Grant them to managed users through Plex Home. Do not commit
+claim tokens, account tokens, `Preferences.xml`, or certificate material.
+
+Copy the resulting hostname, secure URI, and machine identifier into the local
+`deploy/.env`. Point its certificate/config paths at the persisted sidecar.
+Detailed lifecycle and safety constraints are in
+[`docs/PLEX_SETUP.md`](docs/PLEX_SETUP.md).
+
+### 4. Deploy and establish Web authentication
+
+```sh
+./deploy/deploy.sh deploy
+docker logs wonkvod-backend 2>&1 | grep 'one-time setup token'
+```
+
+Keep that command and its output local. Open `http://HOST:32501/setup`, enter
+the token, and choose a password of at least 12 characters. The raw token is
+never persisted and becomes permanently invalid after successful setup.
+
+### 5. Configure the catalog
+
+On **Provider**, test and save the source connection. On **Categories**, choose
+Movie and TV categories and preview their impact. On **Settings**, select the
+steady-state refresh interval and conservative provider concurrency. Run
+**Refresh Now**. The old snapshot remains live until the complete candidate is
+saved and promoted atomically.
+
+## First Run
+
+- **Setup/Login** establishes the one administrator password and later creates
+  a 12-hour authenticated browser session.
+- **Overview** shows health, counts, refresh state, and recent outcomes.
+- **Plex** reports the externally managed identity/TLS state. A ready system
+  needs no setup action.
+- **Provider** tests and saves credentials without returning the saved password.
+- **Categories** previews and applies Movie/TV selections.
+- **Quarantine** displays sanitized item failures and bounded retry actions.
+- **Settings** controls refresh timing/concurrency and changes the administrator
+  password.
+
+## Catalog Refresh
+
+### Normal Refresh
+
+Normal refresh uses provider bulk lists, computes a local diff, reuses unchanged
+canonical objects, enriches only new or changed objects, retries quarantined
+items, and atomically promotes the result. With a stable source it normally
+finishes in seconds.
+
+### Category Expansion
+
+Adding categories may require one-time detail enrichment for many new objects.
+Preview reports the estimated impact. A temporary concurrency override may be
+useful, but high concurrency can trigger provider throttling and never changes
+the saved steady-state value.
+
+### Full Rebuild
+
+Full Rebuild deliberately refetches details for every selected item. It is an
+expensive maintenance/recovery action, not a normal update and not selected
+automatically after restart.
+
+### Quarantine
+
+Isolated malformed or transiently unavailable objects do not poison a complete
+refresh. They enter quarantine with sanitized diagnostics. Retry uses the same
+atomic incremental path at low concurrency; a failed retry leaves the live
+catalog untouched.
+
+## Performance / Scale
+
+The reference installation has been exercised at roughly 20,000 movies, 2,500
+shows, 6,000 seasons, and more than 90,000 episodes. Its persisted catalog is
+measured in hundreds of megabytes rather than media-size storage, and stable
+incremental refreshes complete in seconds. These are observed values, not
+hardware or provider guarantees. Immutable indexes serve lists, paging,
+categories, first-character filters, metadata, and play queues without scanning
+the complete snapshot on each request.
+
+## Client Compatibility
+
+Validated clients include Plex for Roku, Plex HTPC, Plex for Mac, and Plex for
+iOS. The compatibility adapter preserves the paging, provider, navigation,
+metadata, artwork, queue, decision, and range contracts used by those clients.
+WonkVOD does not transcode: Direct Play still depends on each client's support
+for the source container and codecs. A successful catalog entry does not imply
+that every device can decode its media.
+
+## Web Authentication
+
+Web Setup uses a single administrator password. Passwords are hashed with
+Argon2id and stored in `auth.json` mode `0600`; plaintext passwords and raw
+sessions are not persisted. Sessions are random, in memory, expire after 12
+hours, and are invalidated by restart. The session cookie is HttpOnly,
+SameSite=Strict, and Secure when the UI itself is reached through HTTPS.
+State-changing APIs require a per-session CSRF token. Login and setup attempts
+have a small per-client rate limit.
+
+Changing the password under **Settings** invalidates every session and creates a
+replacement session for the current browser. There is no web recovery route. A
+local administrator can stop only the backend, move `auth.json` to a protected
+backup location, and start the backend. A new one-time token is then printed to
+local logs. After establishing the replacement password and verifying access,
+retain or securely destroy the old file according to local policy. Never edit a
+password hash by hand.
+
+Do not expose the plain HTTP Web port directly to the public Internet. Use a
+trusted LAN, loopback plus an authenticated tunnel, or a separately hardened
+HTTPS reverse proxy.
+
+## Configuration
+
+Mutable `config.json` contains the provider URL/credentials, enabled Movie/TV
+category IDs, refresh interval, and steady-state refresh concurrency (`1`, `2`,
+`4`, `6`, `8`, or `10`; default `2`). Environment variables in the protected
+provider file bootstrap a missing config. Leaving the password blank in an
+update preserves its current value.
+
+`deploy/.env` contains installation paths and public endpoint identity. See
+[`deploy/.env.example`](deploy/.env.example) for supported variables. Generated
+runtime state and local environment files are ignored by Git.
+
+## Persistent Data / Backup
+
+Back up:
+
+- `state/config.json` — provider configuration and operator choices;
+- `state/auth.json` — the administrator password hash;
+- `state/catalog.json` — the last promoted catalog and lazy MediaFacts;
+- the entire persistent `plex-identity` config directory; and
+- local ignored deployment/provider environment files.
+
+The catalog is reproducible from the source, but retaining it gives immediate
+startup and preserves inspected media facts. No media cache or spool needs
+backup. Protect all backups because configuration and PMS state contain secrets.
+
+## Ports
+
+| Purpose | Default | Exposure |
+|---|---:|---|
+| Secure Plex-compatible endpoint | TCP 32499 | LAN via TLS terminator |
+| Web Setup | TCP 32501 | loopback by default |
+| Backend Plex listener | TCP 32499 | private Docker network only |
+| Identity PMS admin endpoint | site-defined (reference: 33400 -> 32400) | trusted administration only |
+
+Ports and bind addresses are configurable in ignored `deploy/.env`.
+
+## Managed Plex Home Users
+
+In Plex Home administration, grant a managed user access to both control
+libraries on the WonkVOD identity server:
 
 - `WonkVOD Movies`
 - `WonkVOD TV Shows`
 
-Plex Home managed users are granted access to those Plex library entitlements.
-WonkVOD's virtual sections then provide the actual browsing and playback
-surface. Home-user permission changes are currently manual.
-
-Claim tokens, Plex account tokens, certificate secrets, and provider
-credentials must never be committed or printed in logs.
-
-## Configuration
-
-Mutable configuration is stored atomically in
-`/opt/wonkvod-runtime/state/config.json` on the host and mounted at
-`/var/lib/wonkvod/config.json` in the backend. It includes:
-
-- Xtream base URL, username, and password.
-- Enabled Movie category IDs.
-- Enabled TV category IDs.
-- Catalog refresh interval.
-- Catalog refresh concurrency: `1`, `2`, `4`, `6`, `8`, or `10`; default `2`.
-
-Refresh concurrency controls only simultaneous provider metadata/detail
-requests during catalog refresh. It does not limit Plex clients, media streams,
-MediaFacts inspection, or simultaneous video playback. Lower settings are more
-provider-friendly. A change applies to the next refresh and does not resize a
-refresh already in progress.
-
-Refresh Now and Full Rebuild also offer a one-time concurrency override. The
-override is validated against the same values, applies only to that invocation,
-and never changes the saved default. The default of `2` is intentionally
-conservative. A large category bootstrap may reasonably use a higher temporary
-value, but more concurrency is not always better and can trigger provider
-limits.
-
-Web Setup does not return the saved password. Leaving the password blank during
-an update preserves the existing value. The UI currently has no authentication
-and must remain on a trusted LAN.
-
-## Catalog lifecycle
-
-- The last good `catalog.json` snapshot loads immediately at startup.
-- Normal **Refresh Now**, startup refresh, and the six-hour schedule are
-  incremental. They fetch selected category lists, reuse unchanged canonical
-  records, detect additions/removals/list-level changes, update membership-only
-  changes without detail calls, and retry items in quarantine.
-- Cold bootstrap with no usable snapshot necessarily fetches details for the
-  complete selected catalog.
-- **Full Rebuild** is an explicit, confirmed maintenance action that re-fetches
-  details for every selected item. It is never selected automatically merely
-  because the service restarted.
-- Refresh and rebuild run in the background while the current catalog remains
-  available. The configured concurrency applies to required detail calls in
-  either mode.
-- A completed catalog is saved and promoted atomically.
-- Cancellation, systemic provider failure, or persistence failure leaves the
-  current snapshot active.
-- A refresh has a generous six-hour safety deadline. Individual provider
-  requests remain separately bounded.
-- The same source item in multiple selected categories is one canonical object
-  with multiple memberships. It appears once globally and in every matching
-  category filter; stable Plex IDs remain based on source identity.
-- Isolated items whose metadata cannot be normalized are quarantined rather
-  than blocking an otherwise healthy refresh. The **Quarantine** page reports
-  sanitized failure class, HTTP/transport state, category membership, failure
-  time, and retryability. Retry uses the normal atomic incremental build at
-  provider-safe concurrency `1`; it never edits `catalog.json` in place and a
-  failed retry leaves the live catalog intact. Older generic quarantine records
-  remain readable.
-- MediaFacts are inspected lazily when an item needs them and are merged into
-  later catalog snapshots by stable source identity. Refresh does not probe the
-  entire media catalog.
-- Metadata and artwork are projected from the provider. Availability can vary
-  by provider item.
-
-Movie list provenance uses the provider's stable identity, name/year,
-container, `added` value, and list presentation fields. TV uses equivalent list
-presentation fields plus `last_modified`, which is the provider's inexpensive
-signal for episode-tree changes. These signals make steady-state refresh cheap,
-but they remain provider assertions rather than an independent content audit.
-Use the explicit Full Rebuild operation for occasional deep revalidation when
-provider behavior or metadata freshness is in doubt; WonkVOD does not schedule
-an expensive periodic rebuild implicitly.
-
-Before category selections are saved, **Preview Impact** uses only inexpensive
-bulk category lists to estimate new and removed movies/shows, membership-only
-changes, and overlaps. It performs no detail enrichment. More than 100 new
-top-level items is treated as a large expansion: the UI explains that a longer
-bootstrap is expected and suggests—but never automatically applies—a temporary
-concurrency value. Normal incremental refreshes should remain short when few or
-no detail requests are required; an unusually long steady-state run points to a
-provider or network issue. Full Rebuild is explicitly expensive because every
-selected item is re-fetched.
-
-## Ports and paths
-
-Current deployment defaults:
-
-| Purpose | Current endpoint/path |
-|---|---|
-| Secure Plex-compatible endpoint | HTTPS TCP `32499` |
-| Trusted-LAN Web Setup | HTTP TCP `32501` |
-| Backend Plex listener | TCP `32499`, internal Docker network only |
-| Identity PMS administrative mapping | host TCP `33400` to sidecar `32400` |
-| Runtime state | `/opt/wonkvod-runtime/state` |
-| Configuration | `/opt/wonkvod-runtime/state/config.json` |
-| Catalog snapshot | `/opt/wonkvod-runtime/state/catalog.json` |
-| Identity PMS state | `/opt/plex-identity/config` |
-
-The checked-in Compose file contains installation-specific LAN and
-`plex.direct` values. Review those values when installing on another host.
-
-## Upgrades, backups, and rollback
-
-Commit and test source changes, then use `./deploy/deploy.sh deploy`. The script
-refuses dirty source and labels images with the exact Git revision. Rollback is
-normally a clean checkout of a known-good commit followed by the same deploy
-command; see [`deploy/README.md`](deploy/README.md).
-
-Back up these non-reproducible assets:
-
-- `/opt/wonkvod-runtime/state/config.json`
-- `/opt/wonkvod-runtime/state/catalog.json`
-- `/opt/plex-identity/config`
-- any locally customized deployment configuration or branding
-
-The catalog can be rebuilt from the provider, but its saved snapshot preserves
-immediate startup and lazy MediaFacts. The identity configuration contains the
-claimed PMS identity and certificate lifecycle state. There is no persistent
-media cache or spool that needs backup.
-
-## Limitations
-
-- WonkVOD does not transcode or remux video or audio. Client codec and container
-  support determine whether an item Direct Plays.
-- Identity sidecar provisioning, Plex claiming, and managed-user entitlements
-  are not yet fully self-service.
-- Web Setup is trusted-LAN only and currently has no authentication.
-- Large provider catalogs can take a long time to refresh, especially at the
-  conservative default concurrency.
-- Provider metadata may be incomplete or temporarily unavailable.
-- Roku movie and TV browsing/playback have been validated for compatible media;
-  compatibility is not guaranteed for every codec combination.
-- iPhone client compatibility remains unresolved.
+The permissions are sidecar entitlements; WonkVOD supplies the virtual content.
+If a user sees the server but not a section, re-check both grants and allow Plex
+clients time to refresh their cached resources. Do not recreate the identity to
+fix an entitlement problem.
 
 ## Troubleshooting
 
-### Refresh is taking a long time
+- **Server does not appear:** verify the sidecar is claimed and present, its
+  machine identifier matches `deploy/.env`, `ADVERTISE_IP` is correct, DNS
+  resolves the `plex.direct` hostname to the LAN host, and TLS validates.
+- **Claim/certificate is pending:** inspect the sidecar locally; do not delete
+  its config or reclaim a working identity. Confirm `cert-v2.p12` exists and
+  the TLS container can read it.
+- **Categories saved but content is unchanged:** saving selection is separate
+  from catalog promotion. Run normal Refresh Now and check its final status.
+- **Refresh takes a long time:** category expansion enriches new objects; Full
+  Rebuild refetches everything. A slow no-change incremental run instead points
+  to provider/network latency or throttling.
+- **Provider rejects concurrency:** reduce saved concurrency (default `2`) and
+  retry. Temporary overrides do not change the saved value.
+- **Quarantine has items:** inspect the sanitized class, correct a source issue
+  if possible, then use low-concurrency retry. Healthy content remains live.
+- **Playback reports codec/transcode failure:** the client cannot Direct Play
+  the selected source stream. WonkVOD does not transcode or remux.
+- **Client says server unavailable:** check the advertised secure URI, normal
+  system trust validation, port 32499, sidecar presence, TLS/backend health, and
+  LAN routing. Web Setup health alone does not validate Plex discovery.
+- **Artwork intermittently fails:** verify provider artwork availability and
+  retry later; WonkVOD serves/transforms artwork in memory and does not maintain
+  a permanent image cache.
+- **Cannot log in:** confirm the local clock, restart once to invalidate stale
+  sessions, or use the documented local `auth.json` recovery procedure.
+- **Unsure between refresh modes:** use normal Refresh Now. Reserve Full Rebuild
+  for explicit deep revalidation or recovery.
 
-Open **Overview** to see the running state and elapsed time. The previous
-catalog remains active. Large selections can legitimately take hours with the
-default concurrency of 2. Do not repeatedly restart a healthy refresh.
+## Updating
 
-### Refresh failed
+Fetch or check out a reviewed release in a clean worktree, read its release
+notes, back up persistent state, and run:
 
-Overview displays the sanitized failure. The previous snapshot remains active.
-Check provider reachability and container logs. A provider that rejects
-parallel requests may require concurrency 1 or 2; do not raise concurrency as
-a first response to failures.
+```sh
+./deploy/deploy.sh deploy
+```
 
-### Category changes do not appear in Plex
+The script validates Compose, builds an image labelled with application version
+and exact Git revision, replaces only the backend, and waits for health. It does
+not restart the identity sidecar or production Plex. Keep the previous image as
+the immediate rollback target.
 
-**Apply Categories** saves desired selection only. Select **Refresh Now** and
-wait for successful promotion.
+## Uninstalling
 
-### A client reports a transcoding or playback error
+Stop the `wonkvod` Compose project without deleting volumes or state, then
+remove only WonkVOD containers/images after verifying no rollback is needed.
+Delete runtime state and sidecar configuration only as a separate, deliberate
+action after backups. Removing or reclaiming the sidecar changes Plex identity
+and managed-user entitlements; it is not required merely to stop WonkVOD. Never
+use a broad Docker prune on a shared host.
 
-WonkVOD does not transcode. Confirm the source container, video codec, audio
-codec, channel layout, subtitle format, and the client's Direct Play support.
+## Security
 
-### Plex identity or claim problems
+- Keep provider environment files, `config.json`, `auth.json`, Plex tokens,
+  PMS preferences, certificates, and backups out of Git and mode-restricted.
+- The backend runs non-root, read-only, without Linux capabilities; only the
+  state bind is writable.
+- Web Setup is authenticated but should remain on loopback or a trusted LAN.
+- The TLS terminator reads PMS certificate material read-only and keeps decoded
+  key material in memory.
+- Review container images, ignored local configuration, and repository history
+  before any public publication.
 
-Check the **Plex** page, the `plex-identity` container health, its persistent
-configuration, claim state, and cloud presence. Do not delete or reclaim a
-working identity as a routine troubleshooting step.
+## License / Disclaimer
 
-### A managed user cannot see WonkVOD
+No open-source license has yet been selected. Copyright law therefore reserves
+rights by default; a license decision is required before a public v1.0 release.
 
-Confirm that the user has Plex Home access to both identity-sidecar control
-libraries, `WonkVOD Movies` and `WonkVOD TV Shows`. Do not recreate those
-libraries solely to refresh permissions.
+WonkVOD is an independent, unofficial project. It is not affiliated with,
+sponsored by, or endorsed by Plex. Plex and related trademarks belong to their
+respective owner. Users are responsible for having lawful access to, and the
+necessary rights for, every media source they configure.
 
-### TLS or secure URI is unavailable
+## Architecture / Developer Docs
 
-Check the **Plex** status page, `wonkvod-tls`, certificate readiness in the
-identity sidecar, DNS resolution for the advertised `plex.direct` hostname,
-and the cloud resource connection. Never copy certificate private keys into
-logs or ordinary persistent files.
-
-## Uninstalling or retiring WonkVOD
-
-Stop and remove the WonkVOD backend and TLS containers using the Compose project.
-Decide explicitly whether to retain or remove `/opt/wonkvod-runtime/state`.
-Treat the claimed identity sidecar separately: preserve it for rollback or
-retire it deliberately, including its Plex account registration. Removing
-WonkVOD does not require removing or modifying an unrelated production Plex
-server.
-
-## Further documentation
-
-- [Web Setup](docs/WEB_SETUP.md)
-- [Plex identity setup lifecycle](docs/PLEX_SETUP.md)
+- [Web Setup and authentication](docs/WEB_SETUP.md)
+- [Plex identity lifecycle](docs/PLEX_SETUP.md)
+- [Retired legacy architecture](docs/LEGACY_ARCHITECTURE.md)
 - [Deployment and rollback](deploy/README.md)
-- [Legacy architecture](docs/LEGACY_ARCHITECTURE.md)
-

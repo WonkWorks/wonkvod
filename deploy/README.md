@@ -1,26 +1,36 @@
 # WonkVOD deployment
 
-The persistent runtime is defined by `deploy/compose.yml` under the Compose
-project `wonkvod`. The backend is private on the internal `wonkvod_facade`
-network. `wonkvod-tls` alone publishes TCP 32499 and proxies to the backend.
-The `plex-identity` project remains independently managed and is not restarted
-for normal WonkVOD backend changes.
+`compose.yml` defines the persistent `wonkvod` project. The non-root backend is
+private on `wonkvod_facade`; `wonkvod-tls` alone publishes the Plex TLS port.
+The independently managed `plex-identity` project is not restarted by normal
+backend deployments.
+
+## Local configuration
+
+```sh
+cp deploy/.env.example deploy/.env
+chmod 0600 deploy/.env
+```
+
+Replace the placeholders with this installation's sidecar hostname, URI,
+machine identifier, paths, Docker network, and desired binds. Provider
+bootstrap credentials belong in the protected file selected by
+`WONKVOD_PROVIDER_ENV_FILE`, not in Compose or `deploy/.env`. `config.json`,
+`catalog.json`, and `auth.json` live below `WONKVOD_STATE_DIR`. Web Setup binds
+to loopback by default.
 
 ## Normal workflow
 
-Commit and test changes, then run from the repository root:
+From a clean, tested checkout:
 
 ```sh
 ./deploy/deploy.sh deploy
 ```
 
-The script refuses a dirty checkout. It derives the seven-character image tag
-and full OCI `org.opencontainers.image.revision` label from `git HEAD`, validates
-Compose, builds `wonkvod-backend:<short-commit>`, recreates only the backend,
-waits for health, and prints the running image ID and revision. The TLS proxy is
-not rebuilt or restarted.
-
-Useful commands:
+The script supplies application version `1.0.0`, derives image tag/revision
+from `git HEAD`, validates Compose, builds the backend, recreates only that
+container, and waits for health. It does not restart TLS, the identity PMS, or
+production Plex.
 
 ```sh
 ./deploy/deploy.sh config
@@ -28,24 +38,31 @@ Useful commands:
 ./deploy/deploy.sh status
 ```
 
-Do not invoke `docker compose build` directly: `compose.yml` intentionally
-requires the commit variables supplied by the script, preventing stale or
-ambiguous tags.
+Do not call `docker compose build` directly: Compose requires the revision
+variables supplied by the script.
 
-After deployment, verify the secure endpoint and dependent services separately:
+After deployment, load the ignored local environment before validating its URI:
 
 ```sh
-curl --fail --silent --show-error \
-  https://192-0-2-22.fixture.example.invalid:32499/identity \
-  >/dev/null
+set -a; . deploy/.env; set +a
+curl --fail --silent --show-error "${WONKVOD_SECURE_URI}/identity" >/dev/null
 docker inspect --format '{{.State.Health.Status}}' plex-identity
 docker inspect --format '{{.State.Health.Status}}' plex
 ```
 
+On first authenticated deployment, obtain the setup token locally:
+
+```sh
+docker logs wonkvod-backend 2>&1 | grep 'one-time setup token'
+```
+
+Do not paste that output into issues. Complete `/setup`; later starts use the
+mode-`0600` `auth.json`.
+
 ## Rollback
 
-Check out the desired known-good commit in a clean worktree and run
-`./deploy/deploy.sh deploy`. Existing commit-tagged images remain auditable and
-may also be selected manually by exporting the matching `WONKVOD_VERSION` and
-full `WONKVOD_GIT_COMMIT`, but the normal and safest rollback is a clean source
-checkout followed by the deployment script.
+Check out a known-good commit in a clean worktree and run the same deploy
+command. Keep the immediately previous image until health, catalog, Plex API,
+and media-range checks pass. Application rollback does not require changing
+the identity or TLS container. If the rollback predates Web authentication,
+treat its Web port as trusted-only and retain `auth.json` for the forward fix.

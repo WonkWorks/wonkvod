@@ -27,7 +27,6 @@ import (
 
 const (
 	addr       = ":32499"
-	machineID  = "0123456789abcdef0123456789abcdef01234567"
 	version    = "1.43.2.10687-563d026ea"
 	apiVersion = "1.2.2"
 
@@ -62,6 +61,15 @@ const (
 	sacrificialDuration    = 5021
 	sacrificialBitrate     = 323
 )
+
+var machineID = configuredMachineIdentifier()
+
+func configuredMachineIdentifier() string {
+	if value := strings.TrimSpace(os.Getenv("WONKVOD_MACHINE_IDENTIFIER")); value != "" {
+		return value
+	}
+	return "wonkvod-unconfigured"
+}
 
 type plexBool bool
 
@@ -2521,6 +2529,6 @@ func main() {
 			}
 		}()
 	}
-	log.Printf("WonkVOD test server listening on %s mode=%s", addr, mode)
+	log.Printf("WonkVOD v%s revision=%s listening on %s mode=%s", appVersion, appRevision, addr, mode)
 	log.Fatal(http.ListenAndServe(addr, traceRequests(handler, log.Default())))
 }

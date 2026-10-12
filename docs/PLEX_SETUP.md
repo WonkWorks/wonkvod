@@ -87,9 +87,10 @@ authenticated actions for:
    APIs;
 7. verifying sanitized cloud presence and advertised connections.
 
-These operations require authentication and a narrowly privileged host-side
-orchestrator. They should not be added to the current unauthenticated trusted-LAN
-backend, and Plex account tokens should not be sent back to browser JavaScript.
+These operations require the existing Web administrator authentication plus a
+narrowly privileged host-side orchestrator. The current authenticated backend
+does not have those host privileges, and Plex account tokens must not be sent
+back to browser JavaScript.
 A real Plex OAuth flow has not been implemented; until one exists, claim-token
 acquisition remains a clearly marked manual step.
 

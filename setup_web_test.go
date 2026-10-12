@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -31,12 +33,51 @@ func setupFixture(t *testing.T) (*realCatalogHandler, *catalogRuntime) {
 		writeAPIJSON(w, http.StatusOK, map[string]any{"MediaContainer": map[string]any{"claimed": true, "machineIdentifier": machineID, "token": "must-not-leak"}})
 	}))
 	t.Cleanup(upstream.Close)
-	return &realCatalogHandler{catalog: runtime, upstreamURL: upstream.URL, httpClient: http.DefaultClient}, runtime
+	handler := &realCatalogHandler{catalog: runtime, upstreamURL: upstream.URL, httpClient: http.DefaultClient}
+	handler.setupAuth = configuredTestAuth(t)
+	return handler, runtime
+}
+
+func configuredTestAuth(t *testing.T) *adminAuth {
+	t.Helper()
+	parameters := argon2Parameters{Memory: 8 * 1024, Iterations: 1, Parallelism: 1, SaltLength: 16, KeyLength: 16}
+	path := filepath.Join(t.TempDir(), "auth.json")
+	hash, err := encodeArgon2Hash("test-password-long", parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := saveAuthState(path, authState{Version: authStateVersion, PasswordHash: hash, PasswordSetAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+	auth, err := newAdminAuthWithParameters(path, parameters, log.New(io.Discard, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return auth
+}
+
+func authenticatedSetupHandler(t *testing.T, handler *realCatalogHandler) http.Handler {
+	t.Helper()
+	if handler.setupAuth == nil {
+		handler.setupAuth = configuredTestAuth(t)
+	}
+	token, session, err := handler.setupAuth.createSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	inner := handler.SetupHandler()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.AddCookie(&http.Cookie{Name: adminSessionCookie, Value: token})
+		if stateChangingMethod(r.Method) {
+			r.Header.Set("X-WonkVOD-CSRF", session.CSRF)
+		}
+		inner.ServeHTTP(w, r)
+	})
 }
 
 func TestSetupPagesAssetsAndSecrets(t *testing.T) {
 	handler, _ := setupFixture(t)
-	server := handler.SetupHandler()
+	server := authenticatedSetupHandler(t, handler)
 	for _, path := range []string{"/", "/plex", "/provider", "/categories", "/libraries", "/quarantine", "/settings", "/assets/branding/wonkvodlogo_dark.png", "/assets/branding/wonkvodlogo_light.png"} {
 		response := httptest.NewRecorder()
 		server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
@@ -84,7 +125,7 @@ func TestQuarantineAPIIsBackwardCompatibleAndSanitized(t *testing.T) {
 	}
 	runtime.mu.Unlock()
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/catalog/quarantine?X-Plex-Token=secret", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/catalog/quarantine?X-Plex-Token=secret", nil))
 	if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "secret") {
 		t.Fatalf("unsafe quarantine response status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -103,7 +144,7 @@ func TestQuarantineZeroStateAndThemeContract(t *testing.T) {
 	runtime.snapshot.Quarantine = nil
 	runtime.mu.Unlock()
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/quarantine", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/quarantine", nil))
 	body := response.Body.String()
 	for _, required := range []string{"No quarantined items", "--header:#eef1f5", "--header:#0d1117", "background:var(--header)", "activeTheme()==='dark'?'dark':'light'"} {
 		if !strings.Contains(body, required) {
@@ -122,7 +163,7 @@ func TestRefreshConcurrencyOverrideIsValidatedAndDoesNotPersist(t *testing.T) {
 		return runtime.snapshotCopy(), nil, nil
 	}
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":8}`)))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":8}`)))
 	if response.Code != http.StatusAccepted || <-seen != 8 {
 		t.Fatalf("override response=%d body=%s", response.Code, response.Body.String())
 	}
@@ -135,7 +176,7 @@ func TestRefreshConcurrencyOverrideIsValidatedAndDoesNotPersist(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 	invalid := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":3}`)))
+	authenticatedSetupHandler(t, handler).ServeHTTP(invalid, httptest.NewRequest(http.MethodPost, "/api/catalog/refresh", strings.NewReader(`{"concurrency":3}`)))
 	if invalid.Code != http.StatusBadRequest {
 		t.Fatalf("invalid override status=%d", invalid.Code)
 	}
@@ -204,7 +245,7 @@ func TestQuarantineItemRetryUsesAtomicRefreshAndSafeConcurrency(t *testing.T) {
 	runtime.status = catalogRefreshStatus{CatalogAvailable: true}
 	handler := &realCatalogHandler{catalog: runtime}
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
 	if response.Code != http.StatusAccepted || runtime.catalogStatus().Metrics.EffectiveConcurrency != 1 {
 		t.Fatalf("retry status=%d body=%s metrics=%#v", response.Code, response.Body.String(), runtime.catalogStatus().Metrics)
 	}
@@ -223,7 +264,7 @@ func TestQuarantineItemRetryUsesAtomicRefreshAndSafeConcurrency(t *testing.T) {
 	beforeTitle := runtime.snapshot.Movies[0].Title
 	runtime.mu.Unlock()
 	failed := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(failed, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(failed, httptest.NewRequest(http.MethodPost, "/api/catalog/quarantine/movie/m1/retry", nil))
 	deadline = time.Now().Add(time.Second)
 	for runtime.catalogStatus().RefreshRunning && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
@@ -260,7 +301,7 @@ func TestPlexSetupStateTransitions(t *testing.T) {
 func TestSetupUIHardeningContract(t *testing.T) {
 	handler, _ := setupFixture(t)
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/categories", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/categories", nil))
 	body := response.Body.String()
 	for _, required := range []string{
 		`href="/categories">Categories`, `<h1>Categories</h1>`, `Movie Categories`, `TV Categories`,
@@ -272,7 +313,8 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		`wonkvodlogo_`, `wonkvodlogo_light.png`, `Connection failed.`, `Provider settings saved.`, `Settings saved.`,
 		`Catalog refresh concurrency`, `Lower values are friendlier to providers.`, `This does not control simultaneous video playback.`,
 		`Full Rebuild`, `Normal Refresh checks additions, removals, changes, and quarantined items`, `/api/catalog/rebuild`,
-		`The claimed Plex identity and secure endpoint are ready.`, `Destructive setup actions are intentionally unavailable.`,
+		`The claimed Plex identity and secure endpoint are ready.`, `Plex identity is externally managed. No setup actions are required.`,
+		`Change Admin Password`, `X-WonkVOD-CSRF`, `id="logout"`, `WonkVOD v1.0.0`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("setup UI missing %q", required)
@@ -316,7 +358,7 @@ func TestCatalogRebuildEndpointIsExplicit(t *testing.T) {
 		return runtime.snapshotCopy(), nil, nil
 	}
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/rebuild", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/api/catalog/rebuild", nil))
 	if response.Code != http.StatusAccepted || !strings.Contains(response.Body.String(), `"mode":"full_rebuild"`) {
 		t.Fatalf("rebuild status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -359,7 +401,7 @@ func TestProviderUpdateKeepsOmittedPassword(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPut, "/api/config/provider", strings.NewReader(`{"base_url":"https://new.example","username":"new-user"}`))
 	request.Header.Set("Content-Type", "application/json")
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, request)
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, request)
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
@@ -388,14 +430,14 @@ func TestLibraryCategoryConfigurationIsValidatedBeforePromotion(t *testing.T) {
 	body := `{"movie_category_ids":["917"],"tv_category_ids":["887","926","779"]}`
 	request := httptest.NewRequest(http.MethodPut, "/api/config/libraries", strings.NewReader(body))
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, request)
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, request)
 	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"refresh_required":true`) {
 		t.Fatalf("valid category update status=%d body=%s", response.Code, response.Body.String())
 	}
 	before := runtime.config.snapshot().Libraries
 	bad := httptest.NewRequest(http.MethodPut, "/api/config/libraries", strings.NewReader(`{"movie_category_ids":["missing"],"tv_category_ids":["887"]}`))
 	badResponse := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(badResponse, bad)
+	authenticatedSetupHandler(t, handler).ServeHTTP(badResponse, bad)
 	if badResponse.Code != http.StatusBadRequest || strings.Join(runtime.config.snapshot().Libraries.MovieCategoryIDs, ",") != strings.Join(before.MovieCategoryIDs, ",") {
 		t.Fatalf("invalid category update was promoted: status=%d", badResponse.Code)
 	}
@@ -454,7 +496,7 @@ func TestCatalogRefreshSerializationAndFallback(t *testing.T) {
 func TestCatalogStatusJSON(t *testing.T) {
 	handler, _ := setupFixture(t)
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/catalog/status", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/api/catalog/status", nil))
 	var status catalogStatusResponse
 	if err := json.Unmarshal(response.Body.Bytes(), &status); err != nil {
 		t.Fatal(err)
@@ -473,7 +515,7 @@ func TestHealthDistinguishesColdStart(t *testing.T) {
 	runtime.snapshot = canonicalSnapshot{}
 	runtime.mu.Unlock()
 	response := httptest.NewRecorder()
-	handler.SetupHandler().ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
+	authenticatedSetupHandler(t, handler).ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/healthz", nil))
 	if response.Code != http.StatusServiceUnavailable {
 		t.Fatalf("cold health status = %d", response.Code)
 	}

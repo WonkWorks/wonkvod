@@ -10,6 +10,7 @@ full_commit=$(git -C "$repo_dir" rev-parse HEAD)
 short_commit=$(git -C "$repo_dir" rev-parse --short=7 HEAD)
 export WONKVOD_VERSION="$short_commit"
 export WONKVOD_GIT_COMMIT="$full_commit"
+export WONKVOD_APP_VERSION=${WONKVOD_APP_VERSION:-1.0.0}
 
 compose() {
 	docker compose --project-name wonkvod --project-directory "$deploy_dir" -f "$compose_file" "$@"
@@ -57,9 +58,10 @@ print_status() {
 	container_image=$(docker inspect --format '{{.Config.Image}}' wonkvod-backend)
 	container_image_id=$(docker inspect --format '{{.Image}}' wonkvod-backend)
 	container_revision=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' wonkvod-backend)
+	container_version=$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.version"}}' wonkvod-backend)
 	health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' wonkvod-backend)
-	printf 'git_commit=%s\nimage=%s\nimage_id=%s\nimage_revision=%s\nhealth=%s\n' \
-		"$full_commit" "$container_image" "$container_image_id" "$container_revision" "$health"
+	printf 'git_commit=%s\napp_version=%s\nimage=%s\nimage_id=%s\nimage_revision=%s\nhealth=%s\n' \
+		"$full_commit" "$container_version" "$container_image" "$container_image_id" "$container_revision" "$health"
 }
 
 case "$action" in

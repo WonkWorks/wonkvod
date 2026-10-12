@@ -8,6 +8,7 @@ services:
       dockerfile: Dockerfile
       args:
         VCS_REF: "${WONKVOD_GIT_COMMIT:?set WONKVOD_GIT_COMMIT via deploy/deploy.sh}"
+        APP_VERSION: "${WONKVOD_APP_VERSION:-1.0.0}"
     container_name: wonkvod-backend
     restart: unless-stopped
     read_only: true
@@ -18,7 +19,7 @@ services:
       - ALL
     pids_limit: 128
     env_file:
-      - /opt/wonkvod-runtime/xtream.env
+      - "${WONKVOD_PROVIDER_ENV_FILE:-/opt/wonkvod-runtime/xtream.env}"
     environment:
       WONKVOD_PMS_MODE: "${WONKVOD_PMS_MODE:-real-catalog}"
       WONKVOD_PROVIDER_VARIANT: "${WONKVOD_PROVIDER_VARIANT:-real}"
@@ -26,18 +27,20 @@ services:
       WONKVOD_PMS_UPSTREAM: "http://plex-identity:32400"
       WONKVOD_CATALOG_STATE: "/var/lib/wonkvod/catalog.json"
       WONKVOD_CONFIG_STATE: "/var/lib/wonkvod/config.json"
+      WONKVOD_AUTH_STATE: "/var/lib/wonkvod/auth.json"
       WONKVOD_WEB_ADDR: ":32501"
       WONKVOD_PROFILE_REQUESTS: "${WONKVOD_PROFILE_REQUESTS:-0}"
-      WONKVOD_SECURE_URI: "https://192-0-2-22.fixture.example.invalid:32499"
+      WONKVOD_MACHINE_IDENTIFIER: "${WONKVOD_MACHINE_IDENTIFIER:?set WONKVOD_MACHINE_IDENTIFIER in deploy/.env}"
+      WONKVOD_SECURE_URI: "${WONKVOD_SECURE_URI:?set WONKVOD_SECURE_URI in deploy/.env}"
     volumes:
       - type: bind
-        source: /opt/plex-identity/test2.mp4
+        source: "${PLEX_IDENTITY_CONTROL_MEDIA:-/opt/plex-identity/test2.mp4}"
         target: /opt/plex-identity/test2.mp4
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: /opt/wonkvod-runtime/state
+        source: "${WONKVOD_STATE_DIR:-/opt/wonkvod-runtime/state}"
         target: /var/lib/wonkvod
         read_only: false
         bind:
@@ -49,7 +52,7 @@ services:
       retries: 6
       start_period: 5s
     ports:
-      - "192.0.2.22:32501:32501/tcp"
+      - "${WONKVOD_WEB_BIND_IP:-127.0.0.1}:${WONKVOD_WEB_PORT:-32501}:32501/tcp"
     networks:
       - facade
       - plex-identity
@@ -79,23 +82,23 @@ services:
       BACKEND_URL: "http://wonkvod-backend:32499"
       PLEX_P12_PATH: "/plex/cache/cert-v2.p12"
       PLEX_PREFERENCES_PATH: "/plex/Preferences.xml"
-      PLEX_TLS_HOSTNAME: "192-0-2-22.fixture.example.invalid"
+      PLEX_TLS_HOSTNAME: "${PLEX_TLS_HOSTNAME:?set PLEX_TLS_HOSTNAME in deploy/.env}"
       CERT_POLL_INTERVAL: "60s"
     volumes:
       - type: bind
-        source: /opt/plex-identity/config/Library/Application Support/Plex Media Server/Cache
+        source: "${PLEX_IDENTITY_CONFIG_DIR:-/opt/plex-identity/config/Library/Application Support/Plex Media Server}/Cache"
         target: /plex/cache
         read_only: true
         bind:
           create_host_path: false
       - type: bind
-        source: /opt/plex-identity/config/Library/Application Support/Plex Media Server/Preferences.xml
+        source: "${PLEX_IDENTITY_CONFIG_DIR:-/opt/plex-identity/config/Library/Application Support/Plex Media Server}/Preferences.xml"
         target: /plex/Preferences.xml
         read_only: true
         bind:
           create_host_path: false
     ports:
-      - "32499:32499/tcp"
+      - "${WONKVOD_PLEX_PORT:-32499}:32499/tcp"
     depends_on:
       wonkvod-backend:
         condition: service_healthy
@@ -114,4 +117,4 @@ networks:
   edge:
   plex-identity:
     external: true
-    name: plex-identity_default
+    name: "${PLEX_IDENTITY_NETWORK:-plex-identity_default}"
