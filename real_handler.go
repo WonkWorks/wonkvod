@@ -91,6 +91,10 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeCategories(w, r, 1, true)
 	case requestPath == "/library/sections/2/genre" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeCategories(w, r, 2, true)
+	case requestPath == "/library/sections/1/firstCharacter" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeFirstCharacters(w, r, 1)
+	case requestPath == "/library/sections/2/firstCharacter" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeFirstCharacters(w, r, 2)
 	case strings.HasPrefix(requestPath, "/library/sections/1/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeEmptyNavigation(w, 1)
 	case strings.HasPrefix(requestPath, "/library/sections/2/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):

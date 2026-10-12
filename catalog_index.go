@@ -230,6 +230,55 @@ func (c *catalogRuntime) showWindow(genreID string, reverse bool, startValue, si
 	return items, total
 }
 
+func firstCharacterBucket(title string) int {
+	for _, character := range strings.TrimSpace(title) {
+		switch {
+		case character >= 'A' && character <= 'Z':
+			return int(character-'A') + 1
+		case character >= 'a' && character <= 'z':
+			return int(character-'a') + 1
+		default:
+			return 0
+		}
+	}
+	return 0
+}
+
+// firstCharacterCounts derives navigation buckets directly from the immutable
+// active snapshot. Genre membership is already deduplicated per canonical item
+// by buildCatalogIndexes, so repeated source/category membership cannot inflate
+// these counts.
+func (c *catalogRuntime) firstCharacterCounts(section int, genreID string) [27]int {
+	c.ensureCatalogIndexes()
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	var counts [27]int
+	if section == 2 {
+		if genreID != "" {
+			for _, position := range c.indexes.showGenres[genreID] {
+				counts[firstCharacterBucket(c.snapshot.Shows[position].Title)]++
+			}
+			return counts
+		}
+		for index := range c.snapshot.Shows {
+			counts[firstCharacterBucket(c.snapshot.Shows[index].Title)]++
+		}
+		return counts
+	}
+
+	if genreID != "" {
+		for _, position := range c.indexes.movieGenres[genreID] {
+			counts[firstCharacterBucket(c.snapshot.Movies[position].Title)]++
+		}
+		return counts
+	}
+	for index := range c.snapshot.Movies {
+		counts[firstCharacterBucket(c.snapshot.Movies[index].Title)]++
+	}
+	return counts
+}
+
 func (c *catalogRuntime) episodeWindow(startValue, sizeValue string) ([]catalogPlayable, int) {
 	c.ensureCatalogIndexes()
 	c.mu.RLock()
