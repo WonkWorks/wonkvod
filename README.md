@@ -72,6 +72,9 @@ the response contracts needed by supported stock Plex clients. Refreshing this
 projection does not trigger production PMS scans or alter a Plex SQLite database.
 Movie and show title search uses an in-memory index from the same immutable
 catalog generation; it never queries the provider or performs media inspection.
+WonkVOD v1.0 supports Plex title search for Movies and TV shows; see the
+documented [Plex search contract](docs/SEARCH.md) for its exact routes and
+limits.
 
 ### plex-identity sidecar
 
@@ -107,11 +110,13 @@ not restart or mutate production Plex.
 ## Quick Start
 
 1. Clone the repository into `/opt/wonkvod`.
-2. Copy `deploy/.env.example` to the ignored `deploy/.env` and fill in only
-   installation-specific values.
+2. Copy `deploy/.env.example` to the ignored `deploy/.env`; fill in local paths
+   now and return to the identity fields after sidecar provisioning.
 3. Create the runtime state directory and protected provider bootstrap file.
-4. Provision and claim the `plex-identity` sidecar; create its two control
-   libraries and wait for its certificate.
+4. Follow the complete
+   [manual sidecar provisioning procedure](docs/PLEX_SETUP.md#manual-sidecar-provisioning-wonkvod-v10)
+   to claim `plex-identity`, obtain its machine/secure identities, create its
+   two control libraries, and wait for its certificate.
 5. Run `./deploy/deploy.sh deploy`.
 6. Read the one-time Web Setup token from the local backend logs and establish
    the administrator password at `/setup`.
@@ -146,43 +151,42 @@ WONKVOD_XTREAM_PASS=replace-me
 This file seeds missing configuration. The Web UI later persists settings to
 `config.json`; neither file belongs in Git.
 
-### 2. Configure deployment variables
+### 2. Prepare deployment variables
 
-Edit `deploy/.env`. Set the sidecar-issued `plex.direct` hostname and URI, the
-sidecar machine identifier, persistent paths, Docker network, and desired host
-ports. Web Setup defaults to `127.0.0.1:32501`; bind it to a trusted LAN address
-only when direct LAN access is intended.
+Edit `deploy/.env`. Set the state/provider paths and desired host ports now.
+Web Setup defaults to `127.0.0.1:32501`; bind it to a trusted LAN address only
+when direct LAN access is intended. The next step produces the sidecar-issued
+machine identifier, `plex.direct` hostname, secure URI, certificate path,
+control-media path, and Docker network needed to finish this file.
+
+Do not invent those identity values or copy them from another installation.
+
+### 3. Provision the Plex identity sidecar
+
+Follow **[Manual sidecar provisioning — WonkVOD
+v1.0](docs/PLEX_SETUP.md#manual-sidecar-provisioning-wonkvod-v10)** from start
+to finish. It provides literal commands and the tracked
+`deploy/plex-identity.compose.yml.example` for a new official
+`plexinc/pms-docker` sidecar.
+
+Return here after you have:
+
+- a claimed sidecar named `WonkVOD`;
+- its stable machine identifier;
+- its generated `plex.direct` hostname and full HTTPS URI on port `32499`;
+- a present `Cache/cert-v2.p12`;
+- one-item `WonkVOD Movies` and `WonkVOD TV Shows` control libraries; and
+- any required Plex Home grants.
+
+Copy the exact values into `deploy/.env` using the guide's variable map. The
+identity must belong to this sidecar; never commit its Preferences, token, or
+certificate.
 
 Validate without changing containers:
 
 ```sh
 ./deploy/deploy.sh config
 ```
-
-### 3. Provision the Plex identity sidecar
-
-Create a separately managed official `plexinc/pms-docker` container with:
-
-- persistent `/config` storage (the reference installation uses
-  `/opt/plex-identity/config`);
-- a stable friendly name such as `WonkVOD`;
-- a short-lived claim token supplied only during claiming;
-- an external Docker network named in `PLEX_IDENTITY_NETWORK`; and
-- `ADVERTISE_IP` set to the WonkVOD endpoint, for example
-  `http://LAN-IP:32499/`.
-
-Wait until PMS is claimed, its machine identifier is stable, and
-`Cache/cert-v2.p12` exists. Use supported Plex library APIs to create one tiny
-Movie control library named `WonkVOD Movies` and one tiny TV control library
-named `WonkVOD TV Shows`. Each may contain a harmless local control fixture.
-These sections establish Plex library entitlements; WonkVOD serves the actual
-virtual catalog. Grant them to managed users through Plex Home. Do not commit
-claim tokens, account tokens, `Preferences.xml`, or certificate material.
-
-Copy the resulting hostname, secure URI, and machine identifier into the local
-`deploy/.env`. Point its certificate/config paths at the persisted sidecar.
-Detailed lifecycle and safety constraints are in
-[`docs/PLEX_SETUP.md`](docs/PLEX_SETUP.md).
 
 ### 4. Deploy and establish Web authentication
 
@@ -201,7 +205,9 @@ On **Provider**, test and save the source connection. On **Categories**, choose
 Movie and TV categories and preview their impact. On **Settings**, select the
 steady-state refresh interval and conservative provider concurrency. Run
 **Refresh Now**. The old snapshot remains live until the complete candidate is
-saved and promoted atomically.
+saved and promoted atomically. In Plex, verify that Movies and TV shows browse,
+search by title, open their detail pages, and Direct Play a client-compatible
+source.
 
 ## First Run
 
@@ -226,9 +232,8 @@ saved and promoted atomically.
 |---|---|
 | [![WonkVOD Plex page showing a ready externally managed identity](docs/WonkVOD_Plex.png)](docs/WonkVOD_Plex.png) | [![WonkVOD Settings showing refresh interval and concurrency](docs/WonkVOD_Settings.png)](docs/WonkVOD_Settings.png) |
 
-These screenshots show the core pre-release pages used to validate the catalog
-and sidecar. WonkVOD 1.0 adds Login/Logout, a version footer, password rotation,
-and the simplified ready-state Plex message described above.
+These screenshots show the core WonkVOD Web Setup pages for catalog, sidecar,
+category, and refresh administration.
 
 ## Catalog Refresh
 

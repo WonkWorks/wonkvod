@@ -1,0 +1,22 @@
+name: plex-identity
+
+services:
+  plex-identity:
+    image: plexinc/pms-docker:latest
+    container_name: plex-identity
+    hostname: WonkVOD
+    restart: unless-stopped
+    environment:
+      TZ: "${TZ:-Etc/UTC}"
+      PLEX_CLAIM: "${PLEX_CLAIM:-}"
+      ADVERTISE_IP: "${PLEX_IDENTITY_ADVERTISE_IP:?set PLEX_IDENTITY_ADVERTISE_IP}"
+    ports:
+      - "${PLEX_IDENTITY_ADMIN_BIND_IP:-127.0.0.1}:${PLEX_IDENTITY_ADMIN_PORT:-33400}:32400/tcp"
+    volumes:
+      - type: bind
+        source: "${PLEX_IDENTITY_CONFIG_ROOT:-/opt/plex-identity/config}"
+        target: /config
+      - type: bind
+        source: "${PLEX_IDENTITY_CONTROL_MEDIA_ROOT:-/opt/plex-identity/control-media}"
+        target: /control-media
+        read_only: true

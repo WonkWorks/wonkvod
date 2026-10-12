@@ -5,6 +5,13 @@ private on `wonkvod_facade`; `wonkvod-tls` alone publishes the Plex TLS port.
 The independently managed `plex-identity` project is not restarted by normal
 backend deployments.
 
+For a new installation, use the tracked
+[`plex-identity.compose.yml.example`](plex-identity.compose.yml.example) and
+follow the complete
+[`docs/PLEX_SETUP.md`](../docs/PLEX_SETUP.md#manual-sidecar-provisioning-wonkvod-v10)
+procedure. It covers the one-time claim, certificate/URI discovery, control
+libraries, Plex Home grants, and the exact mapping into `deploy/.env`.
+
 ## Local configuration
 
 ```sh
