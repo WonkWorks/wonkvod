@@ -22,6 +22,8 @@ const (
 type tvMediaContainer struct {
 	XMLName              xml.Name         `json:"-" xml:"MediaContainer"`
 	Size                 int              `json:"size" xml:"size,attr"`
+	TotalSize            *int             `json:"totalSize,omitempty" xml:"totalSize,attr,omitempty"`
+	Offset               *int             `json:"offset,omitempty" xml:"offset,attr,omitempty"`
 	AllowSync            plexBool         `json:"allowSync" xml:"allowSync,attr"`
 	Identifier           string           `json:"identifier" xml:"identifier,attr"`
 	LibrarySectionID     int              `json:"librarySectionID" xml:"librarySectionID,attr"`

@@ -142,8 +142,11 @@ func cloneShowForUpdate(show canonicalShow) canonicalShow {
 
 func catalogWindow(startValue, sizeValue string, total int) (int, int) {
 	start, _ := strconv.Atoi(startValue)
-	if start < 0 || start > total {
+	if start < 0 {
 		start = 0
+	}
+	if start > total {
+		return total, total
 	}
 	size := total - start
 	if requested, err := strconv.Atoi(sizeValue); err == nil && requested >= 0 && requested < size {

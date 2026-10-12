@@ -231,7 +231,9 @@ func itemTimestamp(revision string) int64 {
 }
 
 func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Request) {
-	items, _ := h.catalog.movieWindow(r.URL.Query().Get("genre"), reverseRequested(r), r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+	page := requestContainerPaging(r)
+	startValue, sizeValue := page.windowValues()
+	items, total := h.catalog.movieWindow(r.URL.Query().Get("genre"), reverseRequested(r), startValue, sizeValue)
 	catalogProfileMark(r, "indexed_selection")
 	metadata := make([]movie, 0, len(items))
 	for _, item := range items {
@@ -239,6 +241,10 @@ func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Reque
 	}
 	catalogProfileMark(r, "metadata_assembly")
 	container := mediaContainer{Size: len(metadata), AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Art: "/:/resources/movie-fanart.jpg", Thumb: "/:/resources/movie.png", Title1: libraryName, Title2: "All " + libraryName, ViewGroup: "movie", ViewMode: 65592, Metadata: metadata}
+	if page.Requested {
+		container.TotalSize = intPointer(total)
+		container.Offset = intPointer(page.Start)
+	}
 	if r.URL.Query().Get("includeMeta") == "1" {
 		container.Meta = movieLibraryListMeta()
 	}
@@ -247,9 +253,11 @@ func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request) {
+	page := requestContainerPaging(r)
+	startValue, sizeValue := page.windowValues()
 	genre := r.URL.Query().Get("genre")
 	if genre == "" && r.URL.Query().Get("type") == "4" {
-		playables, _ := h.catalog.episodeWindow(r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+		playables, total := h.catalog.episodeWindow(startValue, sizeValue)
 		catalogProfileMark(r, "indexed_selection")
 		episodes := make([]tvItem, 0, len(playables))
 		for _, item := range playables {
@@ -260,11 +268,15 @@ func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request)
 		container.Title2 = "All Episodes"
 		container.ViewGroup = "episode"
 		container.ViewMode = 65592
+		if page.Requested {
+			container.TotalSize = intPointer(total)
+			container.Offset = intPointer(page.Start)
+		}
 		writeNegotiatedTVContainer(w, r, container)
 		catalogProfileMark(r, "serialization")
 		return
 	}
-	items, _ := h.catalog.showWindow(genre, reverseRequested(r), r.URL.Query().Get("X-Plex-Container-Start"), r.URL.Query().Get("X-Plex-Container-Size"))
+	items, total := h.catalog.showWindow(genre, reverseRequested(r), startValue, sizeValue)
 	catalogProfileMark(r, "indexed_selection")
 	metadata := make([]tvItem, 0, len(items))
 	for _, item := range items {
@@ -278,6 +290,10 @@ func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request)
 	container.ViewGroup = "show"
 	container.ViewMode = 65592
 	container.Nocache = truePointer()
+	if page.Requested {
+		container.TotalSize = intPointer(total)
+		container.Offset = intPointer(page.Start)
+	}
 	if r.URL.Query().Get("includeMeta") == "1" {
 		container.Meta = tvLibraryListMeta()
 	}

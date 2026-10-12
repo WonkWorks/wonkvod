@@ -24,6 +24,8 @@ type genreFacet struct {
 type categoryContainer struct {
 	XMLName         xml.Name            `json:"-" xml:"MediaContainer"`
 	Size            int                 `json:"size" xml:"size,attr"`
+	TotalSize       *int                `json:"totalSize,omitempty" xml:"totalSize,attr,omitempty"`
+	Offset          *int                `json:"offset,omitempty" xml:"offset,attr,omitempty"`
 	AllowSync       plexBool            `json:"allowSync" xml:"allowSync,attr"`
 	Art             string              `json:"art" xml:"art,attr"`
 	Content         string              `json:"content" xml:"content,attr"`
@@ -239,11 +241,23 @@ func (h *realCatalogHandler) writeCategories(w http.ResponseWriter, r *http.Requ
 		name, art, thumb = tvLibraryName, "/:/resources/show-fanart.jpg", "/:/resources/show.png"
 		nocache = truePointer()
 	}
+	total := len(facets)
+	page := containerPaging{}
+	if !legacy {
+		page = requestContainerPaging(r)
+		startValue, sizeValue := page.windowValues()
+		start, end := catalogWindow(startValue, sizeValue, total)
+		facets = facets[start:end]
+	}
 	directories := categoryDirectories(section, facets, legacy)
 	container := categoryContainer{
 		Size: len(directories), AllowSync: false, Art: art, Content: "secondary",
 		Identifier: "com.plexapp.plugins.library", MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1,
 		Nocache: nocache, Thumb: thumb, Title1: name, ViewGroup: "secondary", ViewMode: 65592, Directory: directories,
+	}
+	if page.Requested {
+		container.TotalSize = intPointer(total)
+		container.Offset = intPointer(page.Start)
 	}
 	if legacy {
 		container.Title2 = "By Genre"
