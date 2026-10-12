@@ -67,6 +67,78 @@ func TestAdminAuthBootstrapPersistsOnlyArgon2Verifier(t *testing.T) {
 	}
 }
 
+func pendingAuthHandler(t *testing.T) (http.Handler, string, *bytes.Buffer) {
+	t.Helper()
+	var logs bytes.Buffer
+	auth, err := newAdminAuthWithParameters(filepath.Join(t.TempDir(), "auth.json"), fastAuthParameters(), log.New(&logs, "", 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &realCatalogHandler{setupAuth: auth}
+	return handler.SetupHandler(), setupTokenFromLog(t, logs.String()), &logs
+}
+
+func TestBootstrapPasswordConfirmationSubmission(t *testing.T) {
+	const password = "matching-password-long"
+	server, token, logs := pendingAuthHandler(t)
+	payload, err := json.Marshal(map[string]string{"setup_token": token, "password": password, "confirm_password": password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusCreated {
+		t.Fatalf("matching confirmation status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(logs.String(), password) || strings.Contains(response.Body.String(), password) {
+		t.Fatal("bootstrap password appeared in runtime output")
+	}
+}
+
+func TestBootstrapRejectsDifferingPasswordConfirmation(t *testing.T) {
+	const password = "matching-password-long"
+	const confirmation = "different-password-long"
+	server, token, logs := pendingAuthHandler(t)
+	payload, err := json.Marshal(map[string]string{"setup_token": token, "password": password, "confirm_password": confirmation})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/api/auth/setup", bytes.NewReader(payload))
+	request.Header.Set("Content-Type", "application/json")
+	server.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), "password confirmation does not match") {
+		t.Fatalf("differing confirmation status=%d body=%s", response.Code, response.Body.String())
+	}
+	if strings.Contains(logs.String(), password) || strings.Contains(logs.String(), confirmation) || strings.Contains(response.Body.String(), password) || strings.Contains(response.Body.String(), confirmation) {
+		t.Fatal("rejected bootstrap password appeared in runtime output")
+	}
+}
+
+func TestBootstrapPageBuildsConfirmationPayloadFromExplicitInputs(t *testing.T) {
+	server, _, _ := pendingAuthHandler(t)
+	response := httptest.NewRecorder()
+	server.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "/setup", nil))
+	page := response.Body.String()
+	for _, expected := range []string{
+		`tokenInput=document.querySelector('#token')`,
+		`passwordInput=document.querySelector('#password')`,
+		`confirmInput=document.querySelector('#confirm')`,
+		`setup_token:tokenInput.value`,
+		`password:passwordInput.value`,
+		`confirm_password:confirmInput.value`,
+	} {
+		if !strings.Contains(page, expected) {
+			t.Fatalf("setup page missing explicit payload binding %q", expected)
+		}
+	}
+	if strings.Contains(page, "confirm_password:confirm.value") {
+		t.Fatal("setup page still reads the window.confirm collision")
+	}
+}
+
 func TestWebAuthBoundaryLoginCSRFAndLogout(t *testing.T) {
 	handler, _ := setupFixture(t)
 	server := handler.SetupHandler()
