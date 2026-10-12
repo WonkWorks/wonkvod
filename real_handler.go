@@ -239,6 +239,9 @@ func (h *realCatalogHandler) writeMovieList(w http.ResponseWriter, r *http.Reque
 	}
 	catalogProfileMark(r, "metadata_assembly")
 	container := mediaContainer{Size: len(metadata), AllowSync: true, Identifier: "com.plexapp.plugins.library", LibrarySectionID: 1, LibrarySectionTitle: libraryName, LibrarySectionUUID: libraryUUID, MediaTagPrefix: "/system/bundle/media/flags/", MediaTagVersion: 1, Art: "/:/resources/movie-fanart.jpg", Thumb: "/:/resources/movie.png", Title1: libraryName, Title2: "All " + libraryName, ViewGroup: "movie", ViewMode: 65592, Metadata: metadata}
+	if r.URL.Query().Get("includeMeta") == "1" {
+		container.Meta = movieLibraryListMeta()
+	}
 	writeNegotiatedMediaContainer(w, r, container)
 	catalogProfileMark(r, "serialization")
 }
@@ -275,6 +278,9 @@ func (h *realCatalogHandler) writeTVList(w http.ResponseWriter, r *http.Request)
 	container.ViewGroup = "show"
 	container.ViewMode = 65592
 	container.Nocache = truePointer()
+	if r.URL.Query().Get("includeMeta") == "1" {
+		container.Meta = tvLibraryListMeta()
+	}
 	writeNegotiatedTVContainer(w, r, container)
 	catalogProfileMark(r, "serialization")
 }

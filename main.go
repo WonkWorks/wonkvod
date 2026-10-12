@@ -122,25 +122,26 @@ func (value plexRatingValue) MarshalText() ([]byte, error) {
 }
 
 type mediaContainer struct {
-	XMLName             xml.Name `json:"-" xml:"MediaContainer"`
-	Size                int      `json:"size" xml:"size,attr"`
-	AllowSync           plexBool `json:"allowSync" xml:"allowSync,attr"`
-	Identifier          string   `json:"identifier" xml:"identifier,attr"`
-	LibrarySectionID    int      `json:"librarySectionID" xml:"librarySectionID,attr"`
-	LibrarySectionTitle string   `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
-	LibrarySectionUUID  string   `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
-	Art                 string   `json:"art,omitempty" xml:"art,attr,omitempty"`
-	Thumb               string   `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
-	Title1              string   `json:"title1,omitempty" xml:"title1,attr,omitempty"`
-	Title2              string   `json:"title2,omitempty" xml:"title2,attr,omitempty"`
-	ViewGroup           string   `json:"viewGroup,omitempty" xml:"viewGroup,attr,omitempty"`
-	ViewMode            int      `json:"viewMode,omitempty" xml:"viewMode,attr,omitempty"`
-	MDEDecisionCode     int      `json:"mdeDecisionCode,omitempty" xml:"mdeDecisionCode,attr,omitempty"`
-	MDEDecisionText     string   `json:"mdeDecisionText,omitempty" xml:"mdeDecisionText,attr,omitempty"`
-	MediaTagPrefix      string   `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
-	MediaTagVersion     int      `json:"mediaTagVersion" xml:"mediaTagVersion,attr"`
-	ResourceSession     string   `json:"resourceSession,omitempty" xml:"resourceSession,attr,omitempty"`
-	Metadata            []movie  `json:"Metadata" xml:"Video"`
+	XMLName             xml.Name         `json:"-" xml:"MediaContainer"`
+	Size                int              `json:"size" xml:"size,attr"`
+	AllowSync           plexBool         `json:"allowSync" xml:"allowSync,attr"`
+	Identifier          string           `json:"identifier" xml:"identifier,attr"`
+	LibrarySectionID    int              `json:"librarySectionID" xml:"librarySectionID,attr"`
+	LibrarySectionTitle string           `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
+	LibrarySectionUUID  string           `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
+	Art                 string           `json:"art,omitempty" xml:"art,attr,omitempty"`
+	Thumb               string           `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
+	Title1              string           `json:"title1,omitempty" xml:"title1,attr,omitempty"`
+	Title2              string           `json:"title2,omitempty" xml:"title2,attr,omitempty"`
+	ViewGroup           string           `json:"viewGroup,omitempty" xml:"viewGroup,attr,omitempty"`
+	ViewMode            int              `json:"viewMode,omitempty" xml:"viewMode,attr,omitempty"`
+	MDEDecisionCode     int              `json:"mdeDecisionCode,omitempty" xml:"mdeDecisionCode,attr,omitempty"`
+	MDEDecisionText     string           `json:"mdeDecisionText,omitempty" xml:"mdeDecisionText,attr,omitempty"`
+	MediaTagPrefix      string           `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
+	MediaTagVersion     int              `json:"mediaTagVersion" xml:"mediaTagVersion,attr"`
+	ResourceSession     string           `json:"resourceSession,omitempty" xml:"resourceSession,attr,omitempty"`
+	Meta                *libraryListMeta `json:"Meta,omitempty" xml:"Meta,omitempty"`
+	Metadata            []movie          `json:"Metadata" xml:"Video"`
 }
 
 type mediaContainerResponse struct {

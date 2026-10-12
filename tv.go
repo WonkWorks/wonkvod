@@ -20,28 +20,29 @@ const (
 )
 
 type tvMediaContainer struct {
-	XMLName              xml.Name  `json:"-" xml:"MediaContainer"`
-	Size                 int       `json:"size" xml:"size,attr"`
-	AllowSync            plexBool  `json:"allowSync" xml:"allowSync,attr"`
-	Identifier           string    `json:"identifier" xml:"identifier,attr"`
-	LibrarySectionID     int       `json:"librarySectionID" xml:"librarySectionID,attr"`
-	LibrarySectionTitle  string    `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
-	LibrarySectionUUID   string    `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
-	Key                  string    `json:"key,omitempty" xml:"key,attr,omitempty"`
-	Art                  string    `json:"art,omitempty" xml:"art,attr,omitempty"`
-	Thumb                string    `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
-	Title1               string    `json:"title1,omitempty" xml:"title1,attr,omitempty"`
-	Title2               string    `json:"title2,omitempty" xml:"title2,attr,omitempty"`
-	ViewGroup            string    `json:"viewGroup,omitempty" xml:"viewGroup,attr,omitempty"`
-	ViewMode             int       `json:"viewMode,omitempty" xml:"viewMode,attr,omitempty"`
-	ParentIndex          int       `json:"parentIndex,omitempty" xml:"parentIndex,attr,omitempty"`
-	ParentTitle          string    `json:"parentTitle,omitempty" xml:"parentTitle,attr,omitempty"`
-	GrandparentRatingKey int       `json:"grandparentRatingKey,omitempty" xml:"grandparentRatingKey,attr,omitempty"`
-	GrandparentTitle     string    `json:"grandparentTitle,omitempty" xml:"grandparentTitle,attr,omitempty"`
-	MediaTagPrefix       string    `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
-	MediaTagVersion      int       `json:"mediaTagVersion" xml:"mediaTagVersion,attr"`
-	Nocache              *plexBool `json:"nocache,omitempty" xml:"nocache,attr,omitempty"`
-	Metadata             []tvItem  `json:"Metadata" xml:"Directory"`
+	XMLName              xml.Name         `json:"-" xml:"MediaContainer"`
+	Size                 int              `json:"size" xml:"size,attr"`
+	AllowSync            plexBool         `json:"allowSync" xml:"allowSync,attr"`
+	Identifier           string           `json:"identifier" xml:"identifier,attr"`
+	LibrarySectionID     int              `json:"librarySectionID" xml:"librarySectionID,attr"`
+	LibrarySectionTitle  string           `json:"librarySectionTitle" xml:"librarySectionTitle,attr"`
+	LibrarySectionUUID   string           `json:"librarySectionUUID" xml:"librarySectionUUID,attr"`
+	Key                  string           `json:"key,omitempty" xml:"key,attr,omitempty"`
+	Art                  string           `json:"art,omitempty" xml:"art,attr,omitempty"`
+	Thumb                string           `json:"thumb,omitempty" xml:"thumb,attr,omitempty"`
+	Title1               string           `json:"title1,omitempty" xml:"title1,attr,omitempty"`
+	Title2               string           `json:"title2,omitempty" xml:"title2,attr,omitempty"`
+	ViewGroup            string           `json:"viewGroup,omitempty" xml:"viewGroup,attr,omitempty"`
+	ViewMode             int              `json:"viewMode,omitempty" xml:"viewMode,attr,omitempty"`
+	ParentIndex          int              `json:"parentIndex,omitempty" xml:"parentIndex,attr,omitempty"`
+	ParentTitle          string           `json:"parentTitle,omitempty" xml:"parentTitle,attr,omitempty"`
+	GrandparentRatingKey int              `json:"grandparentRatingKey,omitempty" xml:"grandparentRatingKey,attr,omitempty"`
+	GrandparentTitle     string           `json:"grandparentTitle,omitempty" xml:"grandparentTitle,attr,omitempty"`
+	MediaTagPrefix       string           `json:"mediaTagPrefix" xml:"mediaTagPrefix,attr"`
+	MediaTagVersion      int              `json:"mediaTagVersion" xml:"mediaTagVersion,attr"`
+	Nocache              *plexBool        `json:"nocache,omitempty" xml:"nocache,attr,omitempty"`
+	Meta                 *libraryListMeta `json:"Meta,omitempty" xml:"Meta,omitempty"`
+	Metadata             []tvItem         `json:"Metadata" xml:"Directory"`
 }
 
 type tvMediaContainerResponse struct {
