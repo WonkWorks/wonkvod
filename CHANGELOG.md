@@ -12,11 +12,14 @@
   bounded provider-friendly retry.
 - Plex-compatible libraries, paging, metadata, artwork, queues, decisions,
   byte-range streaming, and lazy MediaFacts.
+- Indexed Movie/Show title search through PMS-compatible hub, universal,
+  section-local, and legacy search responses.
 - Claimed PMS identity-sidecar and in-memory certificate TLS architecture.
 - Web Setup for provider, categories, health, refresh, quarantine, and settings.
 - Single-admin Argon2id authentication, local one-time bootstrap, expiring
   sessions, CSRF, login throttling, and password rotation.
 - Version/revision exposure and generic ignored local deployment configuration.
+- MIT License.
 
 ### Validated
 
@@ -28,4 +31,3 @@
 
 - No transcoding or remuxing.
 - Sidecar provisioning and Plex Home grants remain manual.
-- No license is selected; the final `v1.0.0` tag is blocked on that decision.

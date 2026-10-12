@@ -98,6 +98,10 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeFirstCharacters(w, r, 1)
 	case requestPath == "/library/sections/2/firstCharacter" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeFirstCharacters(w, r, 2)
+	case requestPath == "/library/sections/1/search" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeSectionSearch(w, r, 1)
+	case requestPath == "/library/sections/2/search" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeSectionSearch(w, r, 2)
 	case strings.HasPrefix(requestPath, "/library/sections/1/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeEmptyNavigation(w, 1)
 	case strings.HasPrefix(requestPath, "/library/sections/2/") && (r.Method == http.MethodGet || r.Method == http.MethodHead):
@@ -106,6 +110,8 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.writeHomeHubs(w, r)
 	case requestPath == "/hubs/promoted" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writePromotedHubs(w, r)
+	case requestPath == "/hubs/search" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeSearchHubs(w, r)
 	case requestPath == "/hubs/sections/1" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeSectionHubs(w, r, 1)
 	case requestPath == "/hubs/sections/2" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
@@ -150,6 +156,10 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.passthrough.ServeHTTP(w, r)
+	case requestPath == "/library/search" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeUniversalSearch(w, r)
+	case requestPath == "/search" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
+		h.writeLegacySearch(w, r)
 	default:
 		h.passthrough.ServeHTTP(w, r)
 	}
@@ -167,10 +177,12 @@ func (h *realCatalogHandler) writeProviders(w http.ResponseWriter, r *http.Reque
 					map[string]any{"hubKey": "/hubs", "title": "Home"},
 					h.realLibraryDirectory(1, includePreferences), h.realLibraryDirectory(2, includePreferences),
 				}},
+				map[string]any{"key": "/hubs/search", "type": "search"},
 				map[string]any{"key": "/library/metadata", "type": "metadata"},
 				map[string]any{"key": "/hubs/promoted", "type": "promoted"},
 				map[string]any{"flavor": "universal", "key": "/playQueues", "type": "playqueue"},
 				map[string]any{"key": "/:/timeline", "type": "timeline", "scrobbleKey": "/:/scrobble", "unscrobbleKey": "/:/unscrobble"},
+				map[string]any{"key": "/library/search", "type": "universalsearch"},
 			},
 		}},
 	}}

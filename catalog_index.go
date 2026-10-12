@@ -1,8 +1,10 @@
 package main
 
 import (
+	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type catalogObjectKind uint8
@@ -22,6 +24,20 @@ type catalogLocator struct {
 	episode int
 }
 
+type catalogSearchEntry struct {
+	locator    catalogLocator
+	normalized string
+	words      []string
+	stableKey  string
+}
+
+type catalogSearchResult struct {
+	Kind  catalogObjectKind
+	Rank  int
+	Movie canonicalMovie
+	Show  canonicalShow
+}
+
 // catalogIndexes contains only ephemeral locators into the immutable active
 // snapshot. It is built before a snapshot is published and swapped under the
 // same lock as that snapshot.
@@ -39,6 +55,7 @@ type catalogIndexes struct {
 	showGenres        map[string][]int
 	movieFacets       []genreFacet
 	showFacets        []genreFacet
+	searchTitles      []catalogSearchEntry
 }
 
 func buildCatalogIndexes(snapshot canonicalSnapshot) *catalogIndexes {
@@ -62,6 +79,7 @@ func buildCatalogIndexes(snapshot canonicalSnapshot) *catalogIndexes {
 		index.byRatingKey[movieObjectID(movie)] = locator
 		index.byPartID[partObjectID("movie", movie.SourceID)] = locator
 		index.movieBySourceID[movie.SourceID] = locator
+		index.searchTitles = append(index.searchTitles, newCatalogSearchEntry(locator, movie.Title, movieObjectID(movie)))
 		art := "/library/metadata/" + movieObjectID(movie) + "/art/1"
 		seen := make(map[string]bool)
 		for _, category := range itemCategories(movie.Category, movie.Categories) {
@@ -77,6 +95,7 @@ func buildCatalogIndexes(snapshot canonicalSnapshot) *catalogIndexes {
 		showKey := showObjectID(show)
 		index.byRatingKey[showKey] = showLocator
 		index.showBySourceID[show.SourceID] = showLocator
+		index.searchTitles = append(index.searchTitles, newCatalogSearchEntry(showLocator, show.Title, showKey))
 		art := "/library/metadata/" + showKey + "/art/1"
 		seen := make(map[string]bool)
 		for _, category := range itemCategories(show.Category, show.Categories) {
@@ -109,6 +128,107 @@ func buildCatalogIndexes(snapshot canonicalSnapshot) *catalogIndexes {
 	index.movieGenres = genreMembershipByFacetID(index.movieFacets, index.movieGenres)
 	index.showGenres = genreMembershipByFacetID(index.showFacets, index.showGenres)
 	return index
+}
+
+func newCatalogSearchEntry(locator catalogLocator, title, stableKey string) catalogSearchEntry {
+	normalized := normalizeSearchTitle(title)
+	return catalogSearchEntry{locator: locator, normalized: normalized, words: strings.Fields(normalized), stableKey: stableKey}
+}
+
+// normalizeSearchTitle deliberately uses only Unicode letters and numbers.
+// Punctuation and repeated whitespace become a single word boundary so the
+// same immutable index supports exact, prefix, word-prefix, and substring
+// matching without provider calls or persisted derived state.
+func normalizeSearchTitle(value string) string {
+	var builder strings.Builder
+	space := true
+	for _, character := range strings.ToLower(strings.TrimSpace(value)) {
+		if unicode.IsLetter(character) || unicode.IsNumber(character) {
+			builder.WriteRune(character)
+			space = false
+			continue
+		}
+		if !space && builder.Len() > 0 {
+			builder.WriteByte(' ')
+			space = true
+		}
+	}
+	return strings.TrimSpace(builder.String())
+}
+
+func searchTitleRank(entry catalogSearchEntry, query string) (int, bool) {
+	switch {
+	case query == "" || entry.normalized == "":
+		return 0, false
+	case entry.normalized == query:
+		return 0, true
+	case strings.HasPrefix(entry.normalized, query):
+		return 1, true
+	}
+	for _, word := range entry.words {
+		if strings.HasPrefix(word, query) {
+			return 2, true
+		}
+	}
+	if strings.Contains(entry.normalized, query) {
+		return 3, true
+	}
+	return 0, false
+}
+
+// search returns values copied from the snapshot while holding the same read
+// lock as the immutable title index. A promotion therefore cannot pair an old
+// locator with a new generation of catalog objects.
+func (c *catalogRuntime) search(query string, kind catalogObjectKind) []catalogSearchResult {
+	c.ensureCatalogIndexes()
+	query = normalizeSearchTitle(query)
+	if query == "" {
+		return nil
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	type rankedEntry struct {
+		catalogSearchEntry
+		rank int
+	}
+	ranked := make([]rankedEntry, 0)
+	for _, entry := range c.indexes.searchTitles {
+		if kind != 0 && entry.locator.kind != kind {
+			continue
+		}
+		rank, matched := searchTitleRank(entry, query)
+		if matched {
+			ranked = append(ranked, rankedEntry{catalogSearchEntry: entry, rank: rank})
+		}
+	}
+	sort.SliceStable(ranked, func(left, right int) bool {
+		if ranked[left].rank != ranked[right].rank {
+			return ranked[left].rank < ranked[right].rank
+		}
+		if ranked[left].normalized != ranked[right].normalized {
+			return ranked[left].normalized < ranked[right].normalized
+		}
+		if ranked[left].locator.kind != ranked[right].locator.kind {
+			return ranked[left].locator.kind < ranked[right].locator.kind
+		}
+		return ranked[left].stableKey < ranked[right].stableKey
+	})
+
+	results := make([]catalogSearchResult, 0, len(ranked))
+	for _, entry := range ranked {
+		result := catalogSearchResult{Kind: entry.locator.kind, Rank: entry.rank}
+		switch entry.locator.kind {
+		case catalogMovie:
+			result.Movie = c.snapshot.Movies[entry.locator.movie]
+		case catalogShow:
+			result.Show = c.snapshot.Shows[entry.locator.show]
+		default:
+			continue
+		}
+		results = append(results, result)
+	}
+	return results
 }
 
 func addIndexedGenre(facets map[string]genreFacet, membership map[string][]int, seen map[string]bool, value, art string, position int) {

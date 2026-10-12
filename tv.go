@@ -73,6 +73,10 @@ type tvItem struct {
 	LibrarySectionKey    string      `json:"librarySectionKey,omitempty" xml:"librarySectionKey,attr,omitempty"`
 	LibrarySectionTitle  string      `json:"librarySectionTitle,omitempty" xml:"librarySectionTitle,attr,omitempty"`
 	LibrarySectionUUID   string      `json:"librarySectionUUID,omitempty" xml:"librarySectionUUID,attr,omitempty"`
+	SourceTitle          string      `json:"sourceTitle,omitempty" xml:"sourceTitle,attr,omitempty"`
+	Score                string      `json:"score,omitempty" xml:"score,attr,omitempty"`
+	AllowSync            *plexBool   `json:"allowSync,omitempty" xml:"allowSync,attr,omitempty"`
+	Personal             *plexBool   `json:"personal,omitempty" xml:"personal,attr,omitempty"`
 	ParentGUID           string      `json:"parentGuid,omitempty" xml:"parentGuid,attr,omitempty"`
 	ParentRatingKey      string      `json:"parentRatingKey,omitempty" xml:"parentRatingKey,attr,omitempty"`
 	ParentKey            string      `json:"parentKey,omitempty" xml:"parentKey,attr,omitempty"`
@@ -100,6 +104,11 @@ func intPointer(value int) *int { return &value }
 
 func truePointer() *plexBool {
 	value := plexBool(true)
+	return &value
+}
+
+func falsePointer() *plexBool {
+	value := plexBool(false)
 	return &value
 }
 

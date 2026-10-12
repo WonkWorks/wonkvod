@@ -9,5 +9,5 @@ preferences/tokens, certificates, private keys, logs, and backups out of source
 control. Web Setup is intended for loopback or a trusted LAN. The plain Plex
 backend listener must remain private behind the PMS-certificate TLS terminator.
 
-No open-source license has yet been selected. Review repository history and
-rotate any exposed credential before public publication.
+Review repository history and rotate any exposed credential before public
+publication. Licensing terms are in [`LICENSE`](LICENSE).

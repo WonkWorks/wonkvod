@@ -173,12 +173,18 @@ func TestRealProviderAndCatalogHierarchy(t *testing.T) {
 	provider := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/media/providers", "application/json", nil))
 	providers := provider["MediaProvider"].([]any)
 	features := providers[0].(map[string]any)["Feature"].([]any)
-	if len(features) != 5 {
-		t.Fatalf("features=%d, want 5", len(features))
+	if len(features) != 7 {
+		t.Fatalf("features=%d, want 7", len(features))
 	}
-	timeline := features[4].(map[string]any)
+	if search := features[1].(map[string]any); search["type"] != "search" || search["key"] != "/hubs/search" {
+		t.Fatalf("incomplete search feature: %#v", search)
+	}
+	timeline := features[5].(map[string]any)
 	if timeline["type"] != "timeline" || timeline["scrobbleKey"] != "/:/scrobble" || timeline["unscrobbleKey"] != "/:/unscrobble" {
 		t.Fatalf("incomplete timeline feature: %#v", timeline)
+	}
+	if universal := features[6].(map[string]any); universal["type"] != "universalsearch" || universal["key"] != "/library/search" {
+		t.Fatalf("incomplete universal search feature: %#v", universal)
 	}
 
 	movies := decodeContainer(t, performRealRequest(handler, http.MethodGet, "/library/sections/1/all?X-Plex-Container-Start=0&X-Plex-Container-Size=1", "application/json", nil))

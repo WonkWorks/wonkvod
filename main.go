@@ -180,6 +180,10 @@ type movie struct {
 	LibrarySectionKey     string           `json:"librarySectionKey,omitempty" xml:"librarySectionKey,attr,omitempty"`
 	LibrarySectionTitle   string           `json:"librarySectionTitle,omitempty" xml:"librarySectionTitle,attr,omitempty"`
 	LibrarySectionUUID    string           `json:"librarySectionUUID,omitempty" xml:"librarySectionUUID,attr,omitempty"`
+	SourceTitle           string           `json:"sourceTitle,omitempty" xml:"sourceTitle,attr,omitempty"`
+	Score                 string           `json:"score,omitempty" xml:"score,attr,omitempty"`
+	AllowSync             *plexBool        `json:"allowSync,omitempty" xml:"allowSync,attr,omitempty"`
+	Personal              *plexBool        `json:"personal,omitempty" xml:"personal,attr,omitempty"`
 	ContentRating         string           `json:"contentRating,omitempty" xml:"contentRating,attr,omitempty"`
 	Rating                float64          `json:"rating,omitempty" xml:"rating,attr,omitempty"`
 	AudienceRating        plexRatingValue  `json:"audienceRating" xml:"audienceRating,attr"`

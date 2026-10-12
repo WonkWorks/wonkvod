@@ -70,6 +70,8 @@ separately in `config.json`; media bytes are never persisted.
 The adapter projects the catalog as virtual Movie and TV sections and implements
 the response contracts needed by supported stock Plex clients. Refreshing this
 projection does not trigger production PMS scans or alter a Plex SQLite database.
+Movie and show title search uses an in-memory index from the same immutable
+catalog generation; it never queries the provider or performs media inspection.
 
 ### plex-identity sidecar
 
@@ -264,8 +266,8 @@ shows, 6,000 seasons, and more than 90,000 episodes. Its persisted catalog is
 measured in hundreds of megabytes rather than media-size storage, and stable
 incremental refreshes complete in seconds. These are observed values, not
 hardware or provider guarantees. Immutable indexes serve lists, paging,
-categories, first-character filters, metadata, and play queues without scanning
-the complete snapshot on each request.
+categories, first-character filters, title search, metadata, and play queues
+without provider work on the request path.
 
 ## Client Compatibility
 
@@ -415,8 +417,8 @@ use a broad Docker prune on a shared host.
 
 ## License / Disclaimer
 
-No open-source license has yet been selected. Copyright law therefore reserves
-rights by default; a license decision is required before a public v1.0 release.
+WonkVOD is licensed under the [MIT License](LICENSE).
+Copyright (c) 2026 Evan Cash / WonkWorks.
 
 WonkVOD is an independent, unofficial project. It is not affiliated with,
 sponsored by, or endorsed by Plex. Plex and related trademarks belong to their
@@ -427,5 +429,6 @@ necessary rights for, every media source they configure.
 
 - [Web Setup and authentication](docs/WEB_SETUP.md)
 - [Plex identity lifecycle](docs/PLEX_SETUP.md)
+- [Plex search contract](docs/SEARCH.md)
 - [Retired legacy architecture](docs/LEGACY_ARCHITECTURE.md)
 - [Deployment and rollback](deploy/README.md)
