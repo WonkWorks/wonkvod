@@ -214,6 +214,20 @@ saved and promoted atomically.
 - **Settings** controls refresh timing/concurrency and changes the administrator
   password.
 
+### Web Setup screenshots
+
+| Overview | Categories |
+|---|---|
+| [![WonkVOD Overview showing full catalog counts and incremental refresh metrics](docs/WonkVOD_Overview.png)](docs/WonkVOD_Overview.png) | [![WonkVOD Categories showing source category selection](docs/WonkVOD_Categories.png)](docs/WonkVOD_Categories.png) |
+
+| Plex status | Settings |
+|---|---|
+| [![WonkVOD Plex page showing a ready externally managed identity](docs/WonkVOD_Plex.png)](docs/WonkVOD_Plex.png) | [![WonkVOD Settings showing refresh interval and concurrency](docs/WonkVOD_Settings.png)](docs/WonkVOD_Settings.png) |
+
+These screenshots show the core pre-release pages used to validate the catalog
+and sidecar. WonkVOD 1.0 adds Login/Logout, a version footer, password rotation,
+and the simplified ready-state Plex message described above.
+
 ## Catalog Refresh
 
 ### Normal Refresh
