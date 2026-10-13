@@ -52,7 +52,7 @@ func newRealCatalogHandler(upstream string) (http.Handler, error) {
 	}
 	handler := &realCatalogHandler{
 		catalog: catalog, passthrough: passthrough, upstreamURL: upstream,
-		httpClient: &http.Client{Timeout: 45 * time.Second}, queues: make(map[int64]virtualPlayQueue),
+		httpClient: providerHTTPClient(catalog.providerTransport, 45*time.Second), queues: make(map[int64]virtualPlayQueue),
 	}
 	handler.queueID.Store(1000)
 	return handler, nil

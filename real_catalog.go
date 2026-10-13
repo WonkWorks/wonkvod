@@ -133,6 +133,7 @@ type catalogRuntime struct {
 	capabilities          map[string]xtream.CapabilityProbe
 	inspections           sync.Map
 	backgroundInspections sync.Map
+	providerTransport     http.RoundTripper
 	persistMu             sync.Mutex
 	refreshMu             sync.Mutex
 	refreshing            bool
@@ -181,6 +182,10 @@ type catalogRefreshStatus struct {
 }
 
 func newCatalogRuntime() (*catalogRuntime, error) {
+	providerTransport, err := providerHTTPTransport()
+	if err != nil {
+		return nil, err
+	}
 	statePath := strings.TrimSpace(os.Getenv("WONKVOD_CATALOG_STATE"))
 	if statePath == "" {
 		statePath = defaultCatalogStatePath
@@ -192,7 +197,7 @@ func newCatalogRuntime() (*catalogRuntime, error) {
 	runtime := &catalogRuntime{
 		statePath: statePath, config: config, startedAt: time.Now(),
 		sources: make(map[string]*xtream.VODSource), capabilities: make(map[string]xtream.CapabilityProbe),
-		scheduleWake: make(chan struct{}, 1),
+		scheduleWake: make(chan struct{}, 1), providerTransport: providerTransport,
 	}
 	if client, clientErr := runtime.clientForConfig(config.snapshot()); clientErr == nil {
 		runtime.client = client
@@ -412,7 +417,7 @@ func (c *catalogRuntime) clientForConfig(config appConfig) (*xtream.Client, erro
 	if err := validateAppConfig(config, false); err != nil {
 		return nil, err
 	}
-	return xtream.NewClient(&http.Client{Timeout: providerRequestTimeout}, config.Provider.BaseURL, config.Provider.Username, config.Provider.Password)
+	return xtream.NewClient(providerHTTPClient(c.providerTransport, providerRequestTimeout), config.Provider.BaseURL, config.Provider.Username, config.Provider.Password)
 }
 
 func (c *catalogRuntime) snapshotCopy() canonicalSnapshot {

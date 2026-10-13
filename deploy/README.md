@@ -26,6 +26,27 @@ bootstrap credentials belong in the protected file selected by
 `catalog.json`, and `auth.json` live below `WONKVOD_STATE_DIR`. Web Setup binds
 to loopback by default.
 
+## Optional provider-only HTTP proxy
+
+To keep provider egress separate from Plex traffic, put the explicit proxy URL
+in the ignored, mode-0600 `deploy/.env`:
+
+```text
+WONKVOD_PROVIDER_PROXY_URL=http://gluetun:8888
+```
+
+The backend joins the external network named by
+`WONKVOD_PROVIDER_PROXY_NETWORK` (default `gluetun_default`). A Gluetun
+reference deployment must have `HTTPPROXY=on`; its port 8888 remains internal
+to Docker and must not be host-published. API/catalog calls, provider artwork,
+and provider/CDN media use the proxy. Identity/TLS/Web/health traffic does not.
+If the proxy is unavailable, provider traffic fails closed without a direct
+retry while the last promoted catalog remains available.
+
+Do not configure global `HTTP_PROXY`, `HTTPS_PROXY`, or `ALL_PROXY` variables
+for the backend. Any standards-compliant HTTP proxy may be used; Gluetun is not
+required.
+
 ## Normal workflow
 
 From a clean, tested checkout:

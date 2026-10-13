@@ -30,6 +30,7 @@ services:
       WONKVOD_AUTH_STATE: "/var/lib/wonkvod/auth.json"
       WONKVOD_WEB_ADDR: ":32501"
       WONKVOD_PROFILE_REQUESTS: "${WONKVOD_PROFILE_REQUESTS:-0}"
+      WONKVOD_PROVIDER_PROXY_URL: "${WONKVOD_PROVIDER_PROXY_URL:-}"
       WONKVOD_MACHINE_IDENTIFIER: "${WONKVOD_MACHINE_IDENTIFIER:?set WONKVOD_MACHINE_IDENTIFIER in deploy/.env}"
       WONKVOD_SECURE_URI: "${WONKVOD_SECURE_URI:?set WONKVOD_SECURE_URI in deploy/.env}"
     volumes:
@@ -56,6 +57,7 @@ services:
     networks:
       - facade
       - plex-identity
+      - provider-egress
     logging:
       driver: local
       options:
@@ -118,3 +120,6 @@ networks:
   plex-identity:
     external: true
     name: "${PLEX_IDENTITY_NETWORK:-plex-identity_default}"
+  provider-egress:
+    external: true
+    name: "${WONKVOD_PROVIDER_PROXY_NETWORK:-gluetun_default}"

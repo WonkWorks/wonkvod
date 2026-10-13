@@ -151,6 +151,30 @@ WONKVOD_XTREAM_PASS=replace-me
 This file seeds missing configuration. The Web UI later persists settings to
 `config.json`; neither file belongs in Git.
 
+### Optional provider egress proxy
+
+WonkVOD can route only provider-derived HTTP traffic through an explicit HTTP
+proxy. Add the proxy URL to the ignored, mode-0600 `deploy/.env`:
+
+```text
+WONKVOD_PROVIDER_PROXY_URL=http://gluetun:8888
+```
+
+When configured, Xtream API requests, provider/CDN media requests (including
+redirects, probes, and byte ranges), and provider artwork use that proxy.
+Plex ingress, the identity sidecar, Web Setup, health checks, certificate
+handling, and local identity probes remain direct. A proxy failure is closed:
+WonkVOD keeps the current catalog browseable, but provider tests and refreshes
+fail, artwork returns 502, and media cannot fall back to the host connection.
+
+For the Gluetun reference deployment, enable its internal HTTP proxy with
+`HTTPPROXY=on` and attach `wonkvod-backend` to the external
+`gluetun_default` network. Port 8888 does not need to be published to the host.
+Set `WONKVOD_PROVIDER_PROXY_NETWORK` in `deploy/.env` only when the external
+network has another name. Do not set global `HTTP_PROXY`, `HTTPS_PROXY`, or
+`ALL_PROXY` variables on WonkVOD; those can unintentionally proxy Plex/identity
+traffic. Gluetun and Surfshark are optional examples, not requirements.
+
 ### 2. Prepare deployment variables
 
 Edit `deploy/.env`. Set the state/provider paths and desired host ports now.
