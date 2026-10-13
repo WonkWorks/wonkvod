@@ -88,10 +88,17 @@ services:
 ```
 
 Use the residential WAN address, not the provider VPN address. Configure PMS
-remote mapping through its supported preferences API with publication and
-manual mapping enabled and port `32499`. A successful resource listing should
-contain both a secure local connection and a secure `local=false` connection
-on port 32499. Plex Relay is not required for this reference layout.
+remote mapping through its supported preferences API with these values:
+
+```text
+PublishServerOnPlexOnlineKey=1
+ManualPortMappingMode=1
+ManualPortMappingPort=32499
+```
+
+A successful resource listing should contain both a secure `local=true`
+connection and a secure `local=false` connection on port 32499. Plex Relay is
+not required for this reference layout.
 
 Provider API, artwork, and media egress remain separate: their dedicated HTTP
 transport continues through Gluetun, while the residential address is used
@@ -329,7 +336,7 @@ the following map:
 
 | Variable | Source | Required / example |
 |---|---|---|
-| `WONKVOD_APP_VERSION` | Release being deployed | Keep `1.0.0` for this release. |
+| `WONKVOD_APP_VERSION` | Release being deployed | Keep `1.0.1` for this release. |
 | `WONKVOD_SECURE_URI` | HTTPS URI from the resource query | Required; e.g. `https://192-0-2-10.example.plex.direct:32499`. |
 | `PLEX_TLS_HOSTNAME` | Hostname portion of that URI | Required; e.g. `192-0-2-10.example.plex.direct`. |
 | `WONKVOD_MACHINE_IDENTIFIER` | `ProcessedMachineIdentifier` printed above | Required. |

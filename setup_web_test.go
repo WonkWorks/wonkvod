@@ -314,7 +314,7 @@ func TestSetupUIHardeningContract(t *testing.T) {
 		`Catalog refresh concurrency`, `Lower values are friendlier to providers.`, `This does not control simultaneous video playback.`,
 		`Full Rebuild`, `Normal Refresh checks additions, removals, changes, and quarantined items`, `/api/catalog/rebuild`,
 		`The claimed Plex identity and secure endpoint are ready.`, `Plex identity is externally managed. No setup actions are required.`,
-		`Change Admin Password`, `X-WonkVOD-CSRF`, `id="logout"`, `WonkVOD v1.0.0`,
+		`Change Admin Password`, `X-WonkVOD-CSRF`, `id="logout"`, `WonkVOD v1.0.1`,
 	} {
 		if !strings.Contains(body, required) {
 			t.Fatalf("setup UI missing %q", required)

@@ -8,7 +8,7 @@ services:
       dockerfile: Dockerfile
       args:
         VCS_REF: "${WONKVOD_GIT_COMMIT:?set WONKVOD_GIT_COMMIT via deploy/deploy.sh}"
-        APP_VERSION: "${WONKVOD_APP_VERSION:-1.0.0}"
+        APP_VERSION: "${WONKVOD_APP_VERSION:-1.0.1}"
     container_name: wonkvod-backend
     restart: unless-stopped
     read_only: true

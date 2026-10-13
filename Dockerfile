@@ -9,12 +9,12 @@ COPY internal ./internal
 COPY fixtures ./fixtures
 COPY assets ./assets
 ARG VCS_REF=unknown
-ARG APP_VERSION=1.0.0
+ARG APP_VERSION=1.0.1
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.appVersion=${APP_VERSION} -X main.appRevision=${VCS_REF}" -o /out/wonkvod .
 
 FROM alpine:3.22
 ARG VCS_REF=unknown
-ARG APP_VERSION=1.0.0
+ARG APP_VERSION=1.0.1
 LABEL org.opencontainers.image.title="WonkVOD" \
       org.opencontainers.image.version="${APP_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}"

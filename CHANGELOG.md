@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+## 1.0.1 - 2026-10-13
+
+### Added
+
+- Plex-token authorization for virtual catalog and media routes.
+- Managed-user entitlement enforcement through the sidecar control libraries.
+- Secure remote Plex access through a published `local=false` connection.
+- Optional provider-specific HTTP proxy support and a Gluetun reference
+  configuration.
+
+### Security
+
+- Unauthenticated library and media access is now rejected.
+- Unauthorized item and media requests fail before provider access.
+- Provider egress can fail closed through a configured proxy.
+- Web Setup remains restricted to loopback or a trusted network and must not
+  be exposed publicly.
+
+### Validation
+
+- Owner and managed-user Plex tokens, including partial library entitlements.
+- External unauthenticated probes and authenticated remote-owner access.
+- Physical iPhone access over cellular/5G.
+- Provider egress through a Surfshark Dedicated IP using Gluetun.
+
 ## [1.0.0] - 2026-10-11
 
 ### Added

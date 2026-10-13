@@ -55,7 +55,7 @@ From a clean, tested checkout:
 ./deploy/deploy.sh deploy
 ```
 
-The script supplies application version `1.0.0`, derives image tag/revision
+The script supplies application version `1.0.1`, derives image tag/revision
 from `git HEAD`, validates Compose, builds the backend, recreates only that
 container, and waits for health. It does not restart TLS, the identity PMS, or
 production Plex.

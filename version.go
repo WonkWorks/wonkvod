@@ -1,6 +1,6 @@
 package main
 
 var (
-	appVersion  = "1.0.0"
+	appVersion  = "1.0.1"
 	appRevision = "unknown"
 )

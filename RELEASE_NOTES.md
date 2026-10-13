@@ -1,26 +1,25 @@
-# WonkVOD 1.0.0 Release Notes
+# WonkVOD 1.0.1 Release Notes
 
-WonkVOD 1.0.0 is the first release-candidate checkpoint of the direct Plex
-facade. It represents Xtream-compatible VOD as virtual Movie and TV libraries
-without FUSE, local ingestion, Plex scanners, or Plex database mutation.
+WonkVOD 1.0.1 adds secure remote Plex access and hardens both Plex-client
+authorization and provider networking.
 
-Highlights include a source-neutral catalog, stable identities, incremental
-atomic refresh, quarantine/retry, indexed full-scale browsing, managed Plex
-Home access through an identity sidecar, Plex-managed TLS, and Direct Play
-streaming with byte ranges. Roku, HTPC, Mac, and iOS clients are validated for
-compatible source media.
+Plex clients now authenticate virtual catalog and media requests with their
+normal Plex tokens. WonkVOD validates those tokens through the claimed identity
+sidecar, and Movies/TV visibility follows the user's control-library
+entitlements. Missing or unauthorized access is rejected before provider media
+is contacted.
 
-Movie and TV show title search uses an ephemeral index from the active catalog
-generation. PMS-compatible hub, universal, section-local, and legacy responses
-reuse normal stable item identities without provider or media-inspection work
-on the search path.
+Remote use is supported through a Plex-managed, secure direct connection on
+TCP 32499. The reference deployment publishes both local and remote
+`plex.direct` connections while keeping Web Setup private. Remote owner access
+was validated through Plex Cloud, including physical iPhone playback over
+cellular/5G.
 
-Web Setup now has single-admin Argon2id authentication, local one-time
-bootstrap, 12-hour in-memory sessions, CSRF protection, rate limiting, and
-password rotation. Deployment configuration is generic and image metadata
-exposes application version separately from exact Git revision.
+Provider API, artwork, and media traffic can optionally use a dedicated HTTP
+egress proxy such as Gluetun. Plex-client ingress and identity traffic remain
+direct. When a provider proxy is configured but unavailable, provider traffic
+fails closed instead of falling back to the host connection.
 
-WonkVOD does not transcode or remux. Sidecar claiming, control libraries, and
-managed-user grants remain manual. WonkVOD is distributed under the MIT
-License; users remain responsible for lawful access to and rights in configured
-media sources.
+Web Setup authentication remains separate from Plex-client authorization and
+should be exposed only on loopback or a trusted network. WonkVOD still does not
+transcode or remux, and sidecar provisioning and Plex Home grants remain manual.

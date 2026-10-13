@@ -10,7 +10,7 @@ full_commit=$(git -C "$repo_dir" rev-parse HEAD)
 short_commit=$(git -C "$repo_dir" rev-parse --short=7 HEAD)
 export WONKVOD_VERSION="$short_commit"
 export WONKVOD_GIT_COMMIT="$full_commit"
-export WONKVOD_APP_VERSION=${WONKVOD_APP_VERSION:-1.0.0}
+export WONKVOD_APP_VERSION=${WONKVOD_APP_VERSION:-1.0.1}
 
 compose() {
 	docker compose --project-name wonkvod --project-directory "$deploy_dir" -f "$compose_file" "$@"
