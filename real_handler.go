@@ -26,6 +26,7 @@ type realCatalogHandler struct {
 	passthrough  http.Handler
 	upstreamURL  string
 	httpClient   *http.Client
+	authorizer   *plexAuthorizer
 	setupAuth    *adminAuth
 	setupAuthMu  sync.Mutex
 	setupAuthErr error
@@ -50,9 +51,13 @@ func newRealCatalogHandler(upstream string) (http.Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	authorizer, err := newPlexAuthorizer(upstream)
+	if err != nil {
+		return nil, err
+	}
 	handler := &realCatalogHandler{
 		catalog: catalog, passthrough: passthrough, upstreamURL: upstream,
-		httpClient: providerHTTPClient(catalog.providerTransport, 45*time.Second), queues: make(map[int64]virtualPlayQueue),
+		httpClient: providerHTTPClient(catalog.providerTransport, 45*time.Second), authorizer: authorizer, queues: make(map[int64]virtualPlayQueue),
 	}
 	handler.queueID.Store(1000)
 	return handler, nil
@@ -66,12 +71,17 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+	var authorized bool
+	r, authorized = h.authorizeWonkVODRequest(w, r)
+	if !authorized {
+		return
+	}
 	requestPath := r.URL.Path
 	switch {
 	case requestPath == "/media/providers" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeProviders(w, r)
 	case requestPath == "/library/sections" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
-		h.writeSections(w)
+		h.writeSections(w, r)
 	case requestPath == "/library/sections/1" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
 		h.writeSection(w, 1)
 	case requestPath == "/library/sections/2" && (r.Method == http.MethodGet || r.Method == http.MethodHead):
@@ -167,16 +177,24 @@ func (h *realCatalogHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (h *realCatalogHandler) writeProviders(w http.ResponseWriter, r *http.Request) {
 	includePreferences := r.URL.Query().Get("includePreferences") == "1"
+	authorization := requestPlexAuthorization(r)
+	directories := []any{}
+	if authorization.MoviesAllowed || authorization.TVAllowed {
+		directories = append(directories, map[string]any{"hubKey": "/hubs", "title": "Home"})
+	}
+	if authorization.MoviesAllowed {
+		directories = append(directories, h.realLibraryDirectory(1, includePreferences))
+	}
+	if authorization.TVAllowed {
+		directories = append(directories, h.realLibraryDirectory(2, includePreferences))
+	}
 	document := map[string]any{"MediaContainer": map[string]any{
 		"size": 1, "apiVersion": apiVersion, "friendlyName": "WonkVOD", "machineIdentifier": machineID,
 		"version": version, "platform": "Linux", "myPlex": true, "myPlexSigninState": "ok",
 		"MediaProvider": []any{map[string]any{
 			"identifier": "com.plexapp.plugins.library", "title": "Library", "types": "video", "protocols": "stream",
 			"Feature": []any{
-				map[string]any{"key": "/library/sections", "type": "content", "Directory": []any{
-					map[string]any{"hubKey": "/hubs", "title": "Home"},
-					h.realLibraryDirectory(1, includePreferences), h.realLibraryDirectory(2, includePreferences),
-				}},
+				map[string]any{"key": "/library/sections", "type": "content", "Directory": directories},
 				map[string]any{"key": "/hubs/search", "type": "search"},
 				map[string]any{"key": "/library/metadata", "type": "metadata"},
 				map[string]any{"key": "/hubs/promoted", "type": "promoted"},
@@ -214,14 +232,19 @@ func (h *realCatalogHandler) realLibraryDirectory(section int, includePreference
 	return directory
 }
 
-func (h *realCatalogHandler) writeSections(w http.ResponseWriter) {
+func (h *realCatalogHandler) writeSections(w http.ResponseWriter, r *http.Request) {
 	snapshot := h.catalog.snapshotCopy()
 	now := snapshot.GeneratedAt.Unix()
+	authorization := requestPlexAuthorization(r)
+	directories := []any{}
+	if authorization.MoviesAllowed {
+		directories = append(directories, map[string]any{"agent": "tv.plex.agents.movie", "allowSync": true, "content": true, "createdAt": now, "directory": true, "filters": true, "hidden": 0, "key": "1", "language": "en-US", "metadataAgentProviderGroupId": 1, "refreshing": false, "scannedAt": now, "scanner": "Plex Movie", "title": libraryName, "type": "movie", "updatedAt": now, "uuid": libraryUUID})
+	}
+	if authorization.TVAllowed {
+		directories = append(directories, map[string]any{"agent": "tv.plex.agents.series", "allowSync": true, "content": true, "createdAt": now, "directory": true, "filters": true, "hidden": 0, "key": "2", "language": "en-US", "metadataAgentProviderGroupId": 2, "refreshing": false, "scannedAt": now, "scanner": "Plex TV Series", "title": tvLibraryName, "type": "show", "updatedAt": now, "uuid": tvLibraryUUID})
+	}
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{
-		"size": 2, "allowSync": false, "title1": "Plex Library", "Directory": []any{
-			map[string]any{"agent": "tv.plex.agents.movie", "allowSync": true, "content": true, "createdAt": now, "directory": true, "filters": true, "hidden": 0, "key": "1", "language": "en-US", "metadataAgentProviderGroupId": 1, "refreshing": false, "scannedAt": now, "scanner": "Plex Movie", "title": libraryName, "type": "movie", "updatedAt": now, "uuid": libraryUUID},
-			map[string]any{"agent": "tv.plex.agents.series", "allowSync": true, "content": true, "createdAt": now, "directory": true, "filters": true, "hidden": 0, "key": "2", "language": "en-US", "metadataAgentProviderGroupId": 2, "refreshing": false, "scannedAt": now, "scanner": "Plex TV Series", "title": tvLibraryName, "type": "show", "updatedAt": now, "uuid": tvLibraryUUID},
-		},
+		"size": len(directories), "allowSync": false, "title1": "Plex Library", "Directory": directories,
 	}})
 }
 
@@ -1247,22 +1270,23 @@ func (h *realCatalogHandler) realTVHub(home bool) map[string]any {
 	return hub
 }
 func (h *realCatalogHandler) writeHomeHubs(w http.ResponseWriter, r *http.Request) {
+	authorization := requestPlexAuthorization(r)
 	requested := map[string]bool{}
 	for _, value := range strings.Split(r.URL.Query().Get("identifier"), ",") {
 		requested[value] = true
 	}
 	all := len(requested) == 0 || requested[""]
 	hubs := []any{}
-	if all || requested["home.continue"] {
+	if (authorization.MoviesAllowed || authorization.TVAllowed) && (all || requested["home.continue"]) {
 		hubs = append(hubs, homeContinueHub())
 	}
-	if all || requested["home.ondeck"] {
+	if (authorization.MoviesAllowed || authorization.TVAllowed) && (all || requested["home.ondeck"]) {
 		hubs = append(hubs, homeOnDeckHub())
 	}
-	if all || requested["home.movies.recent"] {
+	if authorization.MoviesAllowed && (all || requested["home.movies.recent"]) {
 		hubs = append(hubs, h.realMovieHub(true))
 	}
-	if all || requested["home.television.recent"] {
+	if authorization.TVAllowed && (all || requested["home.television.recent"]) {
 		hubs = append(hubs, h.realTVHub(true))
 	}
 	catalogProfileMark(r, "indexed_hub_assembly")
@@ -1270,7 +1294,17 @@ func (h *realCatalogHandler) writeHomeHubs(w http.ResponseWriter, r *http.Reques
 	catalogProfileMark(r, "serialization")
 }
 func (h *realCatalogHandler) writePromotedHubs(w http.ResponseWriter, r *http.Request) {
-	hubs := []any{homeContinueHub(), homeOnDeckHub(), h.realMovieHub(false), h.realTVHub(false)}
+	authorization := requestPlexAuthorization(r)
+	hubs := []any{}
+	if authorization.MoviesAllowed || authorization.TVAllowed {
+		hubs = append(hubs, homeContinueHub(), homeOnDeckHub())
+	}
+	if authorization.MoviesAllowed {
+		hubs = append(hubs, h.realMovieHub(false))
+	}
+	if authorization.TVAllowed {
+		hubs = append(hubs, h.realTVHub(false))
+	}
 	catalogProfileMark(r, "indexed_hub_assembly")
 	writeJSON(w, map[string]any{"MediaContainer": map[string]any{"size": len(hubs), "allowSync": true, "identifier": "com.plexapp.plugins.library", "Hub": hubs}})
 	catalogProfileMark(r, "serialization")

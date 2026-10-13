@@ -34,6 +34,33 @@ The sidecar owns identity and control-plane compatibility, not the virtual
 catalog. Managed-user access is currently granted manually through the two
 control-library entitlements.
 
+## Plex client authorization
+
+WonkVOD delegates Plex-client authorization to the identity sidecar. For each
+new Plex token, the backend makes a direct request to the sidecar's
+`/library/sections` endpoint and uses the visible control sections as
+entitlement anchors:
+
+- section 1 (`WonkVOD Movies`) grants the virtual Movies library;
+- section 2 (`WonkVOD TV Shows`) grants the virtual TV library.
+
+Clients may send the token in the `X-Plex-Token` header or query parameter. A
+non-empty header takes precedence. WonkVOD does not accept bearer tokens or
+cookies as Plex authorization, and it never logs or persists raw Plex tokens.
+Validation results are held only in a bounded in-memory cache keyed by a
+SHA-256 token digest: valid grants expire after two minutes and invalid tokens
+after 30 seconds. Sidecar failures are not cached and fail closed.
+
+This is separate from Web administrator authentication on port 32501. The Web
+login/session and CSRF controls do not authorize Plex protocol requests on
+32499, and Plex tokens do not grant Web-administration access.
+
+Do not expose TCP 32499 to the public Internet merely because authorization is
+enabled. Before enabling WAN forwarding, validate an actual current managed
+user token locally and confirm that Movies-only, TV-only, and no-access grants
+produce the expected filtered libraries and 404 responses for unauthorized
+items. Keep the identity sidecar's administrative port private.
+
 ## Manual sidecar provisioning (WonkVOD v1.0)
 
 This is the supported v1.0 procedure for a new Linux/Docker installation. It

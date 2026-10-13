@@ -120,8 +120,14 @@ func (h *realCatalogHandler) searchShowModel(item canonicalShow, scope string, r
 
 func (h *realCatalogHandler) writeSearchHubs(w http.ResponseWriter, r *http.Request) {
 	limit := searchLimit(r)
-	movies := h.catalog.search(r.URL.Query().Get("query"), catalogMovie)
-	shows := h.catalog.search(r.URL.Query().Get("query"), catalogShow)
+	authorization := requestPlexAuthorization(r)
+	var movies, shows []catalogSearchResult
+	if authorization.MoviesAllowed {
+		movies = h.catalog.search(r.URL.Query().Get("query"), catalogMovie)
+	}
+	if authorization.TVAllowed {
+		shows = h.catalog.search(r.URL.Query().Get("query"), catalogShow)
+	}
 
 	type populatedHub struct {
 		spec searchHubSpec
@@ -163,6 +169,9 @@ func (h *realCatalogHandler) writeSearchHubs(w http.ResponseWriter, r *http.Requ
 		emitted[value.spec.Type] = true
 	}
 	for _, spec := range plexSearchHubs {
+		if (spec.Type == "movie" && !authorization.MoviesAllowed) || (spec.Type == "show" && !authorization.TVAllowed) || (spec.Type == "episode" && !authorization.TVAllowed) {
+			continue
+		}
 		if emitted[spec.Type] {
 			continue
 		}
@@ -209,7 +218,8 @@ func (h *realCatalogHandler) writeSectionSearch(w http.ResponseWriter, r *http.R
 
 func (h *realCatalogHandler) writeUniversalSearch(w http.ResponseWriter, r *http.Request) {
 	page := requestContainerPaging(r)
-	results, total, offset := windowSearchResults(h.catalog.search(r.URL.Query().Get("query"), 0), page)
+	results := filterSearchResultsByAuthorization(h.catalog.search(r.URL.Query().Get("query"), 0), requestPlexAuthorization(r))
+	results, total, offset := windowSearchResults(results, page)
 	values := make([]any, 0, len(results))
 	for _, result := range results {
 		var metadata any
@@ -239,7 +249,8 @@ func (h *realCatalogHandler) writeLegacySearch(w http.ResponseWriter, r *http.Re
 	default:
 		kind = catalogSeason // unsupported by the v1 title-search scope
 	}
-	results := limitSearchResults(h.catalog.search(r.URL.Query().Get("query"), kind), searchLimit(r))
+	results := filterSearchResultsByAuthorization(h.catalog.search(r.URL.Query().Get("query"), kind), requestPlexAuthorization(r))
+	results = limitSearchResults(results, searchLimit(r))
 	metadata := make([]any, 0, len(results))
 	for _, result := range results {
 		if result.Kind == catalogMovie {
@@ -259,4 +270,14 @@ func (h *realCatalogHandler) writeLegacySearch(w http.ResponseWriter, r *http.Re
 		"mediaTagPrefix": "/system/bundle/media/flags/", "mediaTagVersion": 1,
 		"Metadata": metadata, "Provider": providers,
 	}})
+}
+
+func filterSearchResultsByAuthorization(results []catalogSearchResult, authorization plexAuthorization) []catalogSearchResult {
+	filtered := make([]catalogSearchResult, 0, len(results))
+	for _, result := range results {
+		if (result.Kind == catalogMovie && authorization.MoviesAllowed) || (result.Kind == catalogShow && authorization.TVAllowed) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
 }
