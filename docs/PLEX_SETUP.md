@@ -61,6 +61,45 @@ user token locally and confirm that Movies-only, TV-only, and no-access grants
 produce the expected filtered libraries and 404 responses for unauthorized
 items. Keep the identity sidecar's administrative port private.
 
+### Optional remote Plex access
+
+Remote access uses the same Plex-managed TLS identity and Plex-facing
+authorization as LAN access. It is optional and should be enabled only after
+owner and managed-user entitlement tests pass locally.
+
+Forward one router port only:
+
+```text
+WAN TCP 32499 -> <WONKVOD_LAN_IP> TCP 32499
+```
+
+Do not forward the Web administration port 32501. Do not enable UPnP or
+NAT-PMP merely for WonkVOD, and do not forward the identity sidecar's
+administrative port.
+
+Configure the identity sidecar with both raw HTTP facade addresses; Plex Cloud
+derives the corresponding trusted `plex.direct` HTTPS connections:
+
+```yaml
+services:
+  plex-identity:
+    environment:
+      ADVERTISE_IP: "http://<WONKVOD_LAN_IP>:32499/,http://<RESIDENTIAL_PUBLIC_IP>:32499/"
+```
+
+Use the residential WAN address, not the provider VPN address. Configure PMS
+remote mapping through its supported preferences API with publication and
+manual mapping enabled and port `32499`. A successful resource listing should
+contain both a secure local connection and a secure `local=false` connection
+on port 32499. Plex Relay is not required for this reference layout.
+
+Provider API, artwork, and media egress remain separate: their dedicated HTTP
+transport continues through Gluetun, while the residential address is used
+only for incoming Plex-client traffic. A dynamic residential address requires
+updating the second `ADVERTISE_IP` value and recreating only the identity
+sidecar. Revalidate the router forward, cloud resource listing, trusted TLS,
+and authorization whenever that address changes.
+
 ## Manual sidecar provisioning (WonkVOD v1.0)
 
 This is the supported v1.0 procedure for a new Linux/Docker installation. It
